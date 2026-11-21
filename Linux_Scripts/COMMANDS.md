@@ -8,7 +8,18 @@ Internal 192.168.220.x, external 10.100.112.x.
 
 ---
 
-## 1. The scripts in this kit (all read-only except backup.sh)
+## Where things live in this repo
+
+| Folder | What | Run from |
+|---|---|---|
+| `Linux_Scripts/` | bash scripts, copied onto one box and run by hand (sections 1 and 1b) | the box |
+| `Linux_Scripts/Wazzuh/` | manual / offline Wazuh install and rule notes (section 13b) | the Wazuh box |
+| `ansible/linux/` | playbooks 00-06 for every Linux box at once (section 2) | your laptop, `cd ansible/linux` first |
+| `ansible/windows/` | Windows playbooks (Windows teammates) | - |
+
+---
+
+## 1. Audit scripts (all read-only except backup.sh)
 
 ```bash
 sudo sh user_audit.sh | tee ua_$(hostname)_$(date +%H%M).txt   # accounts, sudo, SSH keys, sshd
@@ -20,7 +31,55 @@ sudo sh backup.sh                                               # -> /var/tmp/bk
 ```
 Get a script onto a box without Ansible: `scp hunt.sh root@192.168.220.67:/root/`, or paste it in with `cat > hunt.sh << 'EOF'` … `EOF`.
 
-## 2. Ansible one-liners (run from the inv3-ansible folder)
+## 1b. Team enum / password / DNS scripts (Linux_Scripts/)
+
+Pick the one for the distro. Enum + software are read-only; the rest CHANGE things.
+
+```bash
+# enumeration: services, ports, versions, processes, users, cron dirs
+sudo bash debian-enum.sh      # any systemd box: Ubuntu, Lubuntu, Mint, Rocky, Fedora -> /tmp/enum.txt
+sudo ash  alpine-enum.sh      # Alpine (OpenRC)                -> /tmp/enum.txt
+#         linux-enum.sh       = same as alpine-enum.sh (OpenRC only), but writes /home/enum.txt
+nix-shell nix-enum.sh         # NixOS only                     -> /tmp/<host>-enumeration.txt
+
+# installed software
+sudo bash debian-software.sh  # dpkg -l                        -> /tmp/installed-software.txt
+sudo ash  alpine-software.sh  # apk info                       -> /tmp/installed-software.txt
+nix-shell nix-software.sh     # NixOS only                     -> /tmp/<host>-installed-software.txt
+rpm -qa | sort                # Rocky/Fedora: no script, use this
+
+# copy results off, then delete them from the box (some are mode 0777)
+scp root@<box>:/tmp/enum.txt enum_<box>.txt && ssh root@<box> rm /tmp/enum.txt
+
+# DNS (BIND) hardening: recursion off, no zone transfers, hide version, security log
+sudo bash dns.sh              # Debian paths; on Rocky/Fedora edit BIND_OPTIONS_FILE=/etc/named.conf and SERVICE_NAME=named first
+```
+
+**Password rotation by hand (no Ansible):**
+
+```bash
+sudo bash user-passwords.sh   # EVERY UID 1000-5999 user -> /home/<host>-new_passwords.txt
+sudo bash root_pass.sh        # root only                -> /home/<host>-new_root_pass.txt
+```
+- `user-passwords.sh` **includes scored users.** On a box with Quotient-scored accounts, first edit the awk line,
+  e.g. `awk -F: '$3>=1000 && $3<6000 && $1!="jsmith" {print $1}'`. Prefer `04_passwords.yml`, which skips them.
+- Both leave the passwords on the box (user file is mode 0777). Copy them into the tracker, then `shred -u` the file.
+
+## 2. Ansible (run from `ansible/linux/`)
+
+```bash
+cd ansible/linux                                    # ansible.cfg only loads from here
+ansible-playbook 00_bootstrap.yml -k -K             # Python on Alpine + RAM/CPU per box
+ansible-playbook 01_audit.yml -K                    # user + cron audit -> out/<time>/; re-run every 30-45 min
+ansible-playbook 02_backup.yml -K                   # -> loot/backups/<host>-<time>.tgz (section 16)
+ansible-playbook 03_keys.yml -k -K                  # team key on login account; after this no more -k
+ansible-playbook 04_passwords.yml -K --check        # preview, then run without --check -> loot/passwords/*.csv
+ansible-playbook 04_passwords.yml -K -e rotate_login_user=true   # also root on rhel/alpine (login account)
+ansible-playbook 05_sshd.yml -K -l haf              # one box, check scoring, then drop -l
+ansible-playbook 06_wazuh.yml -K                    # manager + agents
+grep -h '^\[!\]' out/<time>/*.txt                   # flagged lines from 01
+```
+Add `-l <host>` to test on one box, `--check --diff` to preview.
 
 ```bash
 ansible linux -m ping                                   # who answers
@@ -169,6 +228,22 @@ tail -50 /var/ossec/logs/ossec.log                   # why it won't connect
 grep -A2 '<server>' /var/ossec/etc/ossec.conf        # which manager it points at
 ```
 
+## 13b. Wazuh by hand (Linux_Scripts/Wazzuh/) - when 06_wazuh.yml can't be used
+
+```bash
+sudo bash wazuh_deploy.sh <this box's IP>    # all-in-one manager + indexer + dashboard (needs internet)
+sudo bash wazuh_offline.sh                   # offline install; full steps in offline_install.md
+# manager firewall (firewallrules.md): agents 1514/tcp, enrollment 1515/tcp, API 55000/tcp, dashboard 443
+firewall-cmd --permanent --add-port={1514,1515,55000}/tcp && firewall-cmd --reload
+ufw allow 1514,1515,55000/tcp
+# Alpine agent by hand (wazuh_playlist.md)
+apk add wazuh-agent && sed -i "s|MANAGER_IP|<manager IP>|g" /var/ossec/etc/ossec.conf && /var/ossec/bin/wazuh-control start
+# log every command run as root via auditd (wazuh_notes.md); then add audit.log as a <localfile> in ossec.conf
+echo '-a exit,always -F arch=b64 -F euid=0 -S execve -k audit-wazuh-c' >> /etc/audit/rules.d/audit.rules
+auditctl -R /etc/audit/rules.d/audit.rules && auditctl -l
+```
+Custom rules (sudo, busybox-as-root): `linux_rules.md` -> `/var/ossec/etc/rules/local_rules.xml` on the manager.
+
 ## 14. OpenWRT router (vigra) - only with its owner
 
 ```bash
@@ -192,6 +267,8 @@ nmap -sV -p- 192.168.220.<x>                 # what a new box is running (takes 
 
 ## 16. Restore one file from a backup
 
+From `ansible/linux/`, using a `02_backup.yml` archive:
+
 ```bash
 H=gufu                        # which box
 F=etc/gitea/app.ini           # the file's path WITHOUT the leading /
@@ -206,10 +283,20 @@ ansible $H -K -b -m shell -a "<test> && <reload>"     # e.g. "nginx -t && system
 ansible $H -K -b -m shell -a "systemctl is-active <service>"
 # then: check Quotient, and note time / host / file / diff output for the incident report
 ```
+
+On the box itself, using a `backup.sh` archive (never untar over `/`):
+
+```bash
+mkdir -p /tmp/r && tar xzf /var/tmp/bk-<host>-<time>.tgz -C /tmp/r etc/nginx/nginx.conf
+diff /etc/nginx/nginx.conf /tmp/r/etc/nginx/nginx.conf
+cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bad && cp /tmp/r/etc/nginx/nginx.conf /etc/nginx/nginx.conf
+# then test + reload with the table in section 17
+```
+
 ## 17. After a restore: test, then reload/restart the service
 
 The test part catches a broken config before the restart, so a bad file can't take the service down.
-Run from the kit folder: `ansible $H -K -b -m shell -a "<command>"`
+From `ansible/linux/`: `ansible $H -K -b -m shell -a "<command>"`. On the box itself, just run the command.
 
 | You restored | Systemd boxes (Ubuntu, Mint, Lubuntu, Rocky, Fedora) | Alpine (OpenRC) |
 |---|---|---|

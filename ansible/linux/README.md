@@ -1,10 +1,10 @@
 # inv3-ansible: Team 12 Linux kit (WCComps INV3)
 
 Lock down, back up, and watch the 7 Linux boxes from one control node.
-Run every command from inside this folder (`cd inv3-ansible`): `ansible.cfg` only loads from here.
+Run every command from inside this folder (`cd ansible/linux`): `ansible.cfg` only loads from here.
 
 ```
-inv3-ansible/
+ansible/linux/
 ├── ansible.cfg
 ├── inventory/
 │   ├── hosts.ini              # the 7 Linux boxes + router/Windows (kept out of [linux])
