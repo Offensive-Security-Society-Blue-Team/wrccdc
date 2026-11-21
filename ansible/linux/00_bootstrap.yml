@@ -1,0 +1,42 @@
+# 00_bootstrap.yml - first contact with every Linux box.
+#   1. installs Python where it's missing (Alpine), so normal modules work
+#   2. prints OS, RAM and CPU per box (use this to pick the Wazuh manager)
+#
+#   ansible-playbook 00_bootstrap.yml -k -K
+#     -k = ask the SSH password   -K = ask the sudo password (debian group)
+#   Different password per box? Put ansible_password=... on that host's line
+#   in inventory/hosts.ini for now, and delete it once 03_keys.yml is done.
+
+- name: Make sure every box can run Ansible modules
+  hosts: linux
+  gather_facts: false          # facts need Python, which may not be there yet
+  tasks:
+    - name: Look for Python (raw = plain SSH, works without Python)
+      ansible.builtin.raw: command -v python3 || command -v python || echo NO_PYTHON
+      register: py
+      changed_when: false
+
+    - name: Install Python on Alpine boxes that lack it (needs the Alpine package mirror)
+      ansible.builtin.raw: apk add --no-cache python3
+      when:
+        - "'NO_PYTHON' in py.stdout"
+        - inventory_hostname in groups['alpine']
+
+    - name: Flag any non-Alpine box without Python - install it by hand
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has no Python. Install python3 by hand, then re-run."
+      when:
+        - "'NO_PYTHON' in py.stdout"
+        - inventory_hostname not in groups['alpine']
+
+- name: Show what each box is
+  hosts: linux
+  gather_facts: true
+  tasks:
+    - name: OS / RAM / CPU
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} |
+          RAM {{ ansible_facts['memtotal_mb'] }} MB total, {{ ansible_facts['memory_mb'].nocache.free | default(ansible_facts['memfree_mb']) }} MB free |
+          {{ ansible_facts['processor_vcpus'] | default('?') }} vCPU |
+          disk / {{ ((ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | first).size_available / 1073741824) | round(1) if (ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | list) else '?' }} GB free

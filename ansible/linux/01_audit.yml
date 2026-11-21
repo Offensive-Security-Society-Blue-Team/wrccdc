@@ -1,0 +1,64 @@
+# 01_audit.yml - run the user + cron audit scripts on every Linux host and save
+# plain-text results on the control node, one file per host per script.
+#
+#   ansible-playbook 01_audit.yml              # all hosts in [linux]
+#   ansible-playbook 01_audit.yml -l web01     # one host
+#
+# Results land in out/<YYYYmmdd-HHMMSS>/<host>-<script>.txt
+# Compare two runs to spot new users/jobs:
+#   diff out/<earlier>/web01-cron_audit.txt out/<later>/web01-cron_audit.txt
+#   grep -h '^\[!\]' out/<run>/*.txt        # every flag, every host
+
+- name: Audit users and scheduled jobs
+  hosts: linux
+  become: true
+  # The 'script' module copies the script over and runs it with /bin/sh.
+  # It does NOT need Python on the target, so it works on old/minimal boxes.
+  gather_facts: false
+
+  tasks:
+    - name: Pick one timestamp for this whole run
+      ansible.builtin.set_fact:
+        out_dir: "{{ playbook_dir }}/out/{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+      run_once: true            # evaluated once, applied to every host
+
+    - name: Create the local output folder
+      ansible.builtin.file:
+        path: "{{ out_dir }}"
+        state: directory
+        mode: "0700"            # this output includes sudoers and key info
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Run the audit scripts
+      ansible.builtin.script:
+        cmd: "scripts/{{ item }}.sh"
+        executable: /bin/sh
+      loop:
+        - user_audit
+        - cron_audit
+      register: audit
+      changed_when: false       # read-only scripts: never report "changed"
+
+    - name: Save each result to the control node
+      ansible.builtin.copy:
+        # Strip the \r that 'script' output can carry over SSH.
+        # Single YAML quotes on purpose: in double quotes YAML would turn \r
+        # into a raw carriage return, Jinja would read it as a newline, and
+        # every line break in the file would be deleted.
+        content: '{{ item.stdout | replace("\r", "") }}'
+        dest: "{{ out_dir }}/{{ inventory_hostname }}-{{ item.item }}.txt"
+        mode: "0600"
+      loop: "{{ audit.results }}"
+      loop_control:
+        label: "{{ inventory_hostname }}-{{ item.item }}"   # keep output out of the terminal
+      delegate_to: localhost
+      become: false
+
+    - name: Show how many flags each host had
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout_lines | select('match', '^\\[!\\]') | list | length }} flagged line(s)"
+      loop: "{{ audit.results }}"
+      loop_control:
+        label: "{{ item.item }}"

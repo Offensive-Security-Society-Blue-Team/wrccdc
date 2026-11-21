@@ -1,0 +1,114 @@
+# 02_backup.yml - copy each box's configs, web files and databases to the
+# control node BEFORE anyone changes anything. Run it again after big fixes.
+#
+#   ansible-playbook 02_backup.yml            # all Linux boxes
+#   ansible-playbook 02_backup.yml -l gufu    # one box
+#
+# Result: loot/backups/<host>-<time>.tgz on the control node (mode 0600).
+# It holds /etc/shadow and DB dumps, so treat it like a password file.
+#
+# Restore ONE file (don't untar over /):
+#   mkdir -p /tmp/r && tar xzf loot/backups/gufu-....tgz -C /tmp/r
+#   then copy just the file you need back with scp/ansible copy.
+
+- name: Back up each Linux box to the control node
+  hosts: linux
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Pick one timestamp for this run
+      ansible.builtin.set_fact:
+        bk_stamp: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+      run_once: true
+
+    - name: See which backup folders exist on this box
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ backup_paths }}"
+      register: bk_stat
+
+    - name: Dump databases if MySQL/MariaDB or PostgreSQL is installed (best effort)
+      # Works when root can log in to the DB without a password (the Debian/
+      # Ubuntu/Rocky default). If it needs a password you'll see a note below.
+      ansible.builtin.shell: |
+        umask 077
+        d=/tmp/.bk-db-{{ bk_stamp }}
+        mkdir -p "$d"
+        if command -v mysqldump >/dev/null 2>&1; then
+          if mysqldump --all-databases --single-transaction > "$d/mysql_all.sql" 2> "$d/mysql.err"; then
+            echo "mysql: dumped"
+          else
+            echo "mysql: FAILED (needs a password? see mysql.err in the backup)"
+          fi
+        fi
+        if command -v pg_dumpall >/dev/null 2>&1; then
+          if su -s /bin/sh postgres -c pg_dumpall > "$d/postgres_all.sql" 2> "$d/pg.err"; then
+            echo "postgres: dumped"
+          else
+            echo "postgres: FAILED (see pg.err in the backup)"
+          fi
+        fi
+        echo "dir=$d"
+      register: dbdump
+      changed_when: false
+
+    - name: Pack everything into one archive on the box
+      ansible.builtin.shell: |
+        umask 077
+        tar czf /tmp/.bk-{{ bk_stamp }}.tgz \
+          --exclude='*/.cache' --exclude='*/node_modules' --exclude='*.iso' --exclude='*.qcow2' \
+          {{ paths }} /tmp/.bk-db-{{ bk_stamp }} 2>/tmp/.bk-{{ bk_stamp }}.err
+        rc=$?
+        # GNU tar exits 1 for "file changed as we read it" (logs) - still usable
+        [ "$rc" -le 1 ] && [ -s /tmp/.bk-{{ bk_stamp }}.tgz ] || exit 1
+        # hand the archive to the login user so it copies over SSH directly
+        # (fetching a root-only file through sudo reads it all into memory)
+        chown '{{ ansible_user }}' /tmp/.bk-{{ bk_stamp }}.tgz
+        du -m /tmp/.bk-{{ bk_stamp }}.tgz | cut -f1
+      vars:
+        paths: "{{ bk_stat.results | selectattr('stat.exists') | map(attribute='item') | join(' ') }}"
+      register: bk_tar
+      changed_when: false
+
+    - name: Archive size check
+      ansible.builtin.set_fact:
+        bk_mb: "{{ bk_tar.stdout_lines | last | int }}"
+        bk_ok: "{{ (bk_tar.stdout_lines | last | int) <= (backup_max_mb | default(400) | int) }}"
+
+    - name: Too big to copy - left on the box instead
+      ansible.builtin.shell: mv /tmp/.bk-{{ bk_stamp }}.tgz /root/.bk-{{ bk_stamp }}.tgz && chown root /root/.bk-{{ bk_stamp }}.tgz
+      when: not bk_ok
+      changed_when: true
+
+    - name: Copy the archive to the control node
+      ansible.builtin.fetch:
+        src: "/tmp/.bk-{{ bk_stamp }}.tgz"
+        dest: "{{ playbook_dir }}/loot/backups/{{ inventory_hostname }}-{{ bk_stamp }}.tgz"
+        flat: true
+      become: false
+      when: bk_ok
+
+    - name: Remove the temporary copies from the box (red team could read them)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/.bk-{{ bk_stamp }}.tgz"
+        - "/tmp/.bk-{{ bk_stamp }}.err"
+        - "/tmp/.bk-db-{{ bk_stamp }}"
+
+    - name: Lock down the local copy
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/loot/backups/{{ inventory_hostname }}-{{ bk_stamp }}.tgz"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: bk_ok
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('saved loot/backups/' ~ inventory_hostname ~ '-' ~ bk_stamp ~ '.tgz (' ~ bk_mb ~ ' MB)') if bk_ok
+             else ('TOO BIG (' ~ bk_mb ~ ' MB > ' ~ (backup_max_mb | default(400)) ~ ') - kept ON THE BOX at /root/.bk-' ~ bk_stamp ~ '.tgz; trim backup_paths or raise -e backup_max_mb=') }} |
+          folders: {{ bk_stat.results | selectattr('stat.exists') | map(attribute='item') | join(', ') }} |
+          {{ dbdump.stdout_lines | reject('match', '^dir=') | join('; ') | default('no databases found', true) }}

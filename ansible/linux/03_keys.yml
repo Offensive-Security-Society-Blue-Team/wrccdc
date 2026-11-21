@@ -1,0 +1,87 @@
+# 03_keys.yml - put the team SSH key(s) on the account Ansible logs in with,
+# then prove key login works.
+#
+# files/team_key.pub may hold SEVERAL public keys, one per line: your Ansible
+# key plus each teammate's own key. Only .pub lines go in; private keys never
+# leave the laptop they were made on. Do this BEFORE 04_passwords.yml, so a password
+# change can never lock you out.
+#
+#   ansible-playbook 03_keys.yml -k -K
+#   ansible-playbook 03_keys.yml -k -K -e wipe_other_keys=true
+#       ^ replaces that account's authorized_keys with ONLY the team key
+#         (kicks out keys red team planted; the old file is kept as a timestamped copy)
+#
+# Only touches the login account (root on rhel/alpine, the sudo user on
+# debian). Other users' keys: check 01_audit.yml output and remove by hand.
+
+- name: Install the team key on the Ansible login account
+  hosts: linux
+  become: true
+  gather_facts: true
+  vars:
+    key_user: "{{ ansible_user }}"
+    wipe_other_keys: false
+    team_keys: "{{ lookup('file', team_pubkey_file).splitlines() | map('trim') | select | reject('match', '^#') | list }}"
+  tasks:
+    - name: Team keys present? (one .pub line per person in files/team_key.pub)
+      ansible.builtin.assert:
+        that:
+          - team_keys | length > 0
+          - team_keys | reject('match', '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-|sk-ssh-ed25519)') | list | length == 0
+        fail_msg: "files/team_key.pub must contain only public keys, one per line (a PRIVATE key or junk line is in there)"
+      run_once: true
+
+    - name: Find that account's home directory
+      ansible.builtin.shell: awk -F':' -v u='{{ key_user }}' '$1 == u {print $6}' /etc/passwd
+      register: home
+      changed_when: false
+      failed_when: home.stdout | length == 0
+
+    - name: Make sure ~/.ssh exists with safe permissions (sshd ignores keys otherwise)
+      ansible.builtin.file:
+        path: "{{ home.stdout }}/.ssh"
+        state: directory
+        owner: "{{ key_user }}"
+        mode: "0700"
+
+    - name: Add the team keys next to whatever is there
+      ansible.builtin.lineinfile:
+        path: "{{ home.stdout }}/.ssh/authorized_keys"
+        line: "{{ item }}"
+        create: true
+        owner: "{{ key_user }}"
+        mode: "0600"
+      loop: "{{ team_keys }}"
+      loop_control:
+        label: "{{ item.split() | last }}"     # show the key's comment (name), not the key
+      when: not (wipe_other_keys | bool)
+
+    - name: Replace authorized_keys with ONLY the team keys (old file kept as backup)
+      ansible.builtin.copy:
+        content: "{{ team_keys | join('\n') }}\n"
+        dest: "{{ home.stdout }}/.ssh/authorized_keys"
+        owner: "{{ key_user }}"
+        mode: "0600"
+        backup: true
+      when: wipe_other_keys | bool
+
+    - name: Fix SELinux labels on Rocky/Fedora (wrong labels = key silently ignored)
+      ansible.builtin.command: restorecon -R "{{ home.stdout }}/.ssh"
+      when: (ansible_facts['selinux'].status | default('disabled')) == 'enabled'
+      changed_when: false
+
+    - name: Prove key login works (from the control node, key only, no password)
+      ansible.builtin.command: >-
+        ssh -i {{ ansible_ssh_private_key_file }} -p {{ ansible_port | default(22) }}
+        -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+        {{ key_user }}@{{ ansible_host | default(inventory_hostname) }} true
+      delegate_to: localhost
+      become: false
+      register: keytest
+      changed_when: false
+      failed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ 'KEY LOGIN OK' if keytest.rc == 0 else 'KEY LOGIN FAILED - keep the current login password for now: ' ~ keytest.stderr }}"
