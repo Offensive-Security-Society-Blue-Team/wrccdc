@@ -1,0 +1,337 @@
+# 06_wazuh.yml - Wazuh MANAGER ONLY (no indexer/dashboard: far less RAM) on
+# the one box in [wazuh_manager], then agents on every other Linux box,
+# pinned to the manager's exact version.
+#
+# Before running: put one host under [wazuh_manager] in inventory/hosts.ini,
+# and set wazuh_manager_ip + wazuh_enroll_password in group_vars/all.yml.
+# Needs internet access to packages.wazuh.com.
+#
+#   ansible-playbook 06_wazuh.yml -K                  # manager + agents
+#   ansible-playbook 06_wazuh.yml -K --tags manager   # manager only
+#   ansible-playbook 06_wazuh.yml -K --tags agents    # (re)deploy agents
+#   ansible-playbook 06_wazuh.yml -K --tags config    # re-push files/agent.conf
+#
+# Read alerts ON THE MANAGER:  tail -f /var/ossec/logs/alerts/alerts.log
+# Agent list:                  /var/ossec/bin/agent_control -l
+
+- name: Check settings before touching anything
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Settings filled in?
+      ansible.builtin.assert:
+        that:
+          - groups['wazuh_manager'] | default([]) | length == 1
+          - wazuh_manager_ip is defined and wazuh_manager_ip != 'CHANGE_ME'
+          - wazuh_enroll_password is defined and wazuh_enroll_password != 'CHANGE_ME'
+        fail_msg: >-
+          Put exactly ONE host under [wazuh_manager] in inventory/hosts.ini and set
+          wazuh_manager_ip + wazuh_enroll_password in inventory/group_vars/all.yml.
+
+# ---------------------------------------------------------------------------
+- name: Install the Wazuh manager
+  hosts: wazuh_manager
+  become: true
+  gather_facts: true
+  tags: [manager]
+  tasks:
+    - name: Manager needs Debian/Ubuntu or RHEL/Rocky/Fedora
+      ansible.builtin.assert:
+        that: ansible_facts['os_family'] in ['Debian', 'RedHat']
+        fail_msg: "Pick a Debian- or RHEL-family box for the manager (not Alpine)."
+      tags: [always]
+
+    - name: "[Debian] prerequisites"
+      ansible.builtin.apt:
+        name: [gnupg, apt-transport-https, curl]
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] Wazuh signing key"
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        curl -fsS https://packages.wazuh.com/key/GPG-KEY-WAZUH |
+        gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import &&
+        chmod 644 /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+        executable: /bin/bash
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] Wazuh repository"
+      ansible.builtin.copy:
+        content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main\n"
+        dest: /etc/apt/sources.list.d/wazuh.list
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] install wazuh-manager"
+      ansible.builtin.apt:
+        name: wazuh-manager
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[RHEL] Wazuh signing key"
+      ansible.builtin.rpm_key:
+        key: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: "[RHEL] Wazuh repository"
+      ansible.builtin.yum_repository:
+        name: wazuh
+        description: Wazuh
+        baseurl: https://packages.wazuh.com/4.x/yum/
+        gpgcheck: true
+        gpgkey: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: "[RHEL] install wazuh-manager"
+      ansible.builtin.package:      # picks dnf or dnf5 (Fedora 41+) by itself
+        name: wazuh-manager
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Read the installed version (agents get pinned to it)
+      ansible.builtin.shell: /var/ossec/bin/wazuh-control info -v
+      register: wv
+      changed_when: false
+      tags: [always]
+
+    - name: Remember it
+      ansible.builtin.set_fact:
+        wazuh_installed_version: "{{ wv.stdout | trim | regex_replace('^v', '') }}"
+      tags: [always]
+
+    - name: Require a password to register agents (stops fake agents)
+      ansible.builtin.copy:
+        content: "{{ wazuh_enroll_password }}\n"
+        dest: /var/ossec/etc/authd.pass
+        owner: root
+        group: wazuh
+        mode: "0640"
+      no_log: true
+      notify: Restart wazuh-manager
+
+    - name: Turn password registration on
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<use_password>no</use_password>'
+        replace: '<use_password>yes</use_password>'
+      notify: Restart wazuh-manager
+
+    - name: Accept router syslog + never auto-block whitelisted IPs
+      ansible.builtin.blockinfile:
+        path: /var/ossec/etc/ossec.conf
+        marker: "<!-- {mark} BLUE TEAM -->"
+        block: |
+          <ossec_config>
+            <remote>
+              <connection>syslog</connection>
+              <port>514</port>
+              <protocol>udp</protocol>
+              <allowed-ips>{{ wazuh_router_syslog_ip }}</allowed-ips>
+            </remote>
+          {% if wazuh_whitelist_ips | length > 0 %}
+            <global>
+          {% for ip in wazuh_whitelist_ips %}
+              <white_list>{{ ip }}</white_list>
+          {% endfor %}
+            </global>
+          {% endif %}
+          </ossec_config>
+      notify: Restart wazuh-manager
+
+    - name: Push the CCDC monitoring config to all agents
+      ansible.builtin.copy:
+        src: files/agent.conf
+        dest: /var/ossec/etc/shared/default/agent.conf
+        owner: wazuh
+        group: wazuh
+        mode: "0660"
+      tags: [config]
+      notify: Restart wazuh-manager
+
+    - name: Check agent.conf syntax
+      ansible.builtin.command: /var/ossec/bin/verify-agent-conf
+      register: vac
+      changed_when: false
+      failed_when: false
+      tags: [config]
+
+    - name: agent.conf check result
+      ansible.builtin.debug:
+        var: vac.stdout_lines
+      tags: [config]
+
+    - name: Start the manager on boot
+      ansible.builtin.service:
+        name: wazuh-manager
+        enabled: true
+        state: started
+
+    - name: Next steps on the manager box
+      ansible.builtin.debug:
+        msg:
+          - "Wazuh manager {{ wazuh_installed_version }} on {{ inventory_hostname }}"
+          - "Firewall: allow 1514/tcp and 1515/tcp from 192.168.220.0/24, 514/udp from the router. Keep 55000 closed."
+          - "Alerts: tail -f /var/ossec/logs/alerts/alerts.log"
+
+  handlers:
+    - name: Restart wazuh-manager
+      ansible.builtin.service:
+        name: wazuh-manager
+        state: restarted
+
+# ---------------------------------------------------------------------------
+- name: Install Wazuh agents (same version as the manager)
+  hosts: "linux:!wazuh_manager"
+  become: true
+  gather_facts: true
+  tags: [agents]
+  vars:
+    mgr: "{{ groups['wazuh_manager'][0] }}"
+    wv: "{{ hostvars[mgr].wazuh_installed_version | default('') }}"
+    agent_env:
+      WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+      WAZUH_REGISTRATION_PASSWORD: "{{ wazuh_enroll_password }}"
+      WAZUH_AGENT_NAME: "{{ inventory_hostname }}"
+  tasks:
+    - name: Know the manager version?
+      ansible.builtin.assert:
+        that: wv | length > 0
+        fail_msg: "Manager version unknown - is the manager installed? Run 06_wazuh.yml without --tags first."
+
+    # --- Debian family ---
+    - name: "[Debian] prerequisites"
+      ansible.builtin.apt:
+        name: [gnupg, apt-transport-https, curl]
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] Wazuh signing key"
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        curl -fsS https://packages.wazuh.com/key/GPG-KEY-WAZUH |
+        gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import &&
+        chmod 644 /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+        executable: /bin/bash
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] Wazuh repository"
+      ansible.builtin.copy:
+        content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main\n"
+        dest: /etc/apt/sources.list.d/wazuh.list
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] install wazuh-agent {{ wv }}"
+      ansible.builtin.apt:
+        name: "wazuh-agent={{ wv }}-1"
+        update_cache: true
+      environment: "{{ agent_env }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: "[Debian] hold the version (no accidental upgrade past the manager)"
+      ansible.builtin.dpkg_selections:
+        name: wazuh-agent
+        selection: hold
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # --- RHEL family ---
+    - name: "[RHEL] Wazuh signing key"
+      ansible.builtin.rpm_key:
+        key: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: "[RHEL] Wazuh repository"
+      ansible.builtin.yum_repository:
+        name: wazuh
+        description: Wazuh
+        baseurl: https://packages.wazuh.com/4.x/yum/
+        gpgcheck: true
+        gpgkey: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: "[RHEL] install wazuh-agent {{ wv }}"
+      ansible.builtin.package:      # picks dnf or dnf5 (Fedora 41+) by itself
+        name: "wazuh-agent-{{ wv }}-1"
+      environment: "{{ agent_env }}"
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # --- Alpine (best effort: check packages exist for this version) ---
+    - name: "[Alpine] Wazuh signing key"
+      ansible.builtin.get_url:
+        url: https://packages.wazuh.com/key/alpine-devel%40wazuh.com-633d7457.rsa.pub
+        dest: /etc/apk/keys/alpine-devel@wazuh.com-633d7457.rsa.pub
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Alpine'
+      ignore_errors: true
+
+    - name: "[Alpine] Wazuh repository"
+      ansible.builtin.lineinfile:
+        path: /etc/apk/repositories
+        line: https://packages.wazuh.com/4.x/alpine/v3.12/main
+      when: ansible_facts['os_family'] == 'Alpine'
+
+    - name: "[Alpine] install wazuh-agent {{ wv }}"
+      ansible.builtin.shell: apk update && apk add "wazuh-agent={{ wv }}-r1"
+      environment: "{{ agent_env }}"
+      register: apk_agent
+      changed_when: "'Installing' in apk_agent.stdout"
+      when: ansible_facts['os_family'] == 'Alpine'
+      ignore_errors: true
+
+    # --- every distro: set the manager address + password explicitly, so it
+    #     works even if the package ignored the install-time variables ---
+    - name: Point the agent at the manager
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<address>[^<]*</address>'
+        replace: "<address>{{ wazuh_manager_ip }}</address>"
+      register: addr
+      failed_when: false
+
+    - name: Registration password for the agent
+      ansible.builtin.copy:
+        content: "{{ wazuh_enroll_password }}\n"
+        dest: /var/ossec/etc/authd.pass
+        owner: root
+        group: wazuh
+        mode: "0640"
+      no_log: true
+      failed_when: false
+
+    - name: Start the agent (systemd)
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      when: ansible_facts['service_mgr'] == 'systemd'
+
+    - name: Start the agent (Alpine / OpenRC)
+      ansible.builtin.shell: /var/ossec/bin/wazuh-control restart
+      when: ansible_facts['service_mgr'] != 'systemd'
+      failed_when: false
+
+# ---------------------------------------------------------------------------
+- name: Confirm agents checked in
+  hosts: wazuh_manager
+  become: true
+  gather_facts: false
+  tags: [agents]
+  tasks:
+    - name: Give agents a moment to register
+      ansible.builtin.pause:
+        seconds: 20
+
+    - name: Agent list
+      ansible.builtin.command: /var/ossec/bin/agent_control -l
+      register: agents
+      changed_when: false
+
+    - name: Agents (want every Linux box listed as Active)
+      ansible.builtin.debug:
+        var: agents.stdout_lines

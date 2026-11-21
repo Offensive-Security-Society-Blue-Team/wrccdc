@@ -1,0 +1,6 @@
+out/
+loot/
+logs/*
+!logs/.gitkeep
+*.retry
+files/team_key.pub
