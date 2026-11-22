@@ -5,7 +5,7 @@
 #
 # Usage:   sudo sh hunt.sh | tee "hunt_$(hostname)_$(date +%H%M).txt"
 #          sudo RECENT_DAYS=1 sh hunt.sh
-#          ansible linux -K -b -m script -a scripts/hunt.sh      (all boxes)
+#          ansible linux -m script -a scripts/hunt.sh            (all boxes)
 # Output:  [!] lines are leads, not proof. Changes NOTHING.
 # Works on: Debian/Ubuntu, RHEL/Rocky/Fedora, Alpine (busybox). POSIX sh.
 

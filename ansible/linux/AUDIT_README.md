@@ -34,12 +34,21 @@ ansible-playbook 01_audit.yml -l web01        # one host
 Results: `out/<timestamp>/<host>-user_audit.txt` and `-cron_audit.txt` (mode 0600).
 `script` doesn't need Python on the target, so this works on minimal or old boxes.
 
-**Catch changes between runs** (rerun every 30-45 min):
+**After the first pass, use `verify_clean.sh` and `hunt.sh` instead of re-running 01.** At INV3, 01 was run at the start and once after the first fixes. After that, checks were one line per box:
+
+```bash
+ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"   # every 10-15 min
+ansible linux -m script -a "scripts/hunt.sh" | tee out/hunt_$(date +%H%M).txt | grep -E "=====|\[!\]"
+```
+
+To compare two 01 runs anyway:
 
 ```bash
 diff out/<earlier>/web01-cron_audit.txt out/<later>/web01-cron_audit.txt
 grep -h '^\[!\]' out/<run>/*.txt           # every flag from every host
 ```
+
+See `README.md` (sections *Clean-up pass* and *Watching*) for the scripts that fix what these find.
 
 ## Expected noise
 
