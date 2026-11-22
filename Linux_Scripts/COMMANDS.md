@@ -81,7 +81,7 @@ ansible-playbook 02_backup.yml -l 'linux:!gufu'     # -> loot/backups/<host>-<ti
 ansible-playbook 03_keys.yml -k                     # team key on login account; after this no more -k
 ansible-playbook 04_passwords.yml --check           # preview, then run without --check -> loot/passwords/*.csv
 ansible-playbook 04_passwords.yml -e rotate_login_user=true      # also root (the login account)
-ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"   # 05 step: harden.sh replaces 05_sshd.yml
+ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"   # step 05 (05_sshd.yml was removed)
 ansible-playbook 06_wazuh.yml                       # manager + agents
 grep -h '^\[!\]' out/<time>/*.txt                   # flagged lines from 01
 ```

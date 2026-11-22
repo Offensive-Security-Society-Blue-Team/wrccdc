@@ -14,7 +14,6 @@ ansible/linux/
 ├── 02_backup.yml              # /etc, web roots, DB dumps -> loot/backups/
 ├── 03_keys.yml                # team SSH key on the login account + proves it works
 ├── 04_passwords.yml           # new random passwords -> loot/passwords/*.csv
-├── 05_sshd.yml                # older sshd hardening; harden.sh replaces it in the run order
 ├── 06_wazuh.yml               # Wazuh manager on one box + agents everywhere else
 ├── files/agent.conf           # what Wazuh watches (pushed to every agent)
 ├── run.sh                     # LAPTOP     run any scripts/*.sh on boxes + save the output to out/  <- use this
@@ -168,7 +167,6 @@ ansible skerja -m script -a "scripts/reissue_cert.sh /etc/step/skerja-https.env"
 - **Scored users:** 04 never touches anything in `scored_users`. Change those through **Quotient** only.
 - **Rotating the login account's own password:** run 04 with `-e rotate_login_user=true`, only after 03 said KEY LOGIN OK. If the debian group logs in as a sudo user, that's also the new sudo password for `-K`.
 - **`-e wipe_other_keys` is gone from 03:** it deleted the scoring `cert-authority` line. Use `keys_pick.sh` to remove other keys. If an old run already wiped it, put it back from the backup copy 03 left: `ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`.
-- **05 and harden.sh both write an sshd block; use one.** 05 always turns off TCP/agent forwarding. harden.sh only does that with `--no-forwarding`, because it breaks `ssh -J` jump hosts through the box. If 05 already ran on a box, forwarding is off there.
 - **Locked accounts** (Ubuntu's root, `!`/`*` in shadow) are skipped on purpose. Setting a password would unlock them.
 - **Backups bigger than 400 MB** stay on the box at `/root/.bk-*.tgz`. Trim `backup_paths`, or raise the limit with `-e backup_max_mb=800`.
 - **Wazuh needs internet** to reach packages.wazuh.com. Manager on Debian/RHEL only, never Alpine. Agents are pinned to the manager's exact version.
