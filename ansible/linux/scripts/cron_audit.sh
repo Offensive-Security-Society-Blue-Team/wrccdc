@@ -161,6 +161,71 @@ for d in /root/.config/systemd/user /home/*/.config/systemd/user; do
     [ -d "$d" ] && flag "user-level systemd units in $d: $(ls "$d" | tr '\n' ' ')"
 done
 
+section "systemd drop-ins (*.service.d/*.conf: add commands to an EXISTING service)"
+# INV3: zz-udev-cache.conf was dropped into ssh/sshd/nginx .service.d - it runs with that service.
+if [ -d /etc/systemd/system ]; then
+    found=0
+    for f in /etc/systemd/system/*.d/*.conf /run/systemd/system/*.d/*.conf; do
+        [ -f "$f" ] || continue
+        found=1; echo "--- $f   (modified $(mtime "$f"))"
+        grep -E '^[[:space:]]*(Exec[A-Za-z]*|Environment[A-Za-z]*|User)=' "$f" | while IFS= read -r l; do flag "    $l"; done
+    done
+    [ "$found" -eq 1 ] || echo "(none)"
+fi
+
+section "Units in /usr/lib or /lib that no package installed"
+# INV3: devnode-syncd.service sat in /usr/lib/systemd/system next to real units, owned by no package.
+owner_check() {  # prints the files from stdin that no package owns
+    if have dpkg; then xargs -r dpkg -S 2>&1 >/dev/null | sed -n 's/^dpkg-query: no path found matching pattern //p'
+    elif have rpm; then xargs -r rpm -qf 2>&1 | sed -n -e 's/^file \(.*\) is not owned by any package$/\1/p' -e 's/^error: file \(.*\): No such file or directory$/\1/p'
+    elif have apk; then while read -r f; do apk info -W "$f" 2>/dev/null | grep -q 'owned by' || echo "$f"; done
+    else cat >/dev/null; echo "(no dpkg/rpm/apk: cannot check)"; fi
+}
+if [ -d /usr/lib/systemd/system ] || [ -d /lib/systemd/system ]; then
+    # /lib and /usr/lib are often the same folder and the package database knows only one spelling,
+    # so ask about both and call it orphaned only if NEITHER is owned.
+    orphans=$(find /usr/lib/systemd/system /lib/systemd/system -maxdepth 1 -type f \( -name '*.service' -o -name '*.timer' \) 2>/dev/null \
+        | sed 's|.*/||' | sort -u | sed 's|^|/lib/systemd/system/|; p; s|^/lib/|/usr/lib/|' | owner_check \
+        | sed 's|^/usr/lib/|/lib/|' | sort | uniq -c | awk '$1 >= 2 || /^ *[0-9]+ \(no / {sub(/^ *[0-9]+ /, ""); print}' \
+        | while read -r f; do case "$f" in "(no "*) echo "$f" ;; *) [ -f "/usr$f" ] && echo "/usr$f" || echo "$f" ;; esac; done)
+    if [ -n "$orphans" ]; then
+        printf '%s\n' "$orphans" | while read -r f; do
+            case "$f" in "(no "*) echo "$f"; continue ;; esac
+            flag "not from any package: $f   (modified $(mtime "$f"))"
+            grep -E '^[[:space:]]*Exec[A-Za-z]*=' "$f" 2>/dev/null | sed 's/^/        /'
+        done
+    else
+        echo "(every unit belongs to a package)"
+    fi
+fi
+
+section "CI/CD runners (run whatever a repo push or workflow schedule says)"
+# INV3: Gitea's act_runner on thorska ran a workflow every 5 min as root; a red team commit
+# to that repo re-added their SSH keys each time.
+found=0; runner=0
+for p in /proc/[0-9]*; do
+    c=$(cat "$p/comm" 2>/dev/null)
+    case "$c" in act_runner|gitea-runner|forgejo-runne*|gitlab-runner|Runner.Listener|Runner.Worker|jenkins-agent|buildkite-agen*|drone-runner*)
+        found=1; runner=1; flag "runner running: pid ${p#/proc/} ($c) user=$(stat -c %U "$p" 2>/dev/null) cmd: $(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-100)" ;;
+    esac
+done
+for f in /etc/systemd/system/*runner*.service /usr/lib/systemd/system/*runner*.service /etc/act_runner/config.yaml /etc/gitea-runner/config.yaml \
+         /etc/gitlab-runner/config.toml /root/.runner /var/lib/act_runner/.runner /opt/*/.runner; do
+    [ -f "$f" ] && { found=1; runner=1; echo "runner config: $f   (modified $(mtime "$f"))"; }
+done
+# workflow files on this box with a schedule or that touch keys/users/sudo
+for f in $(find /root /home /opt /srv /var/lib -maxdepth 6 \( -path '*/.gitea/workflows/*' -o -path '*/.github/workflows/*' -o -path '*/.forgejo/workflows/*' \
+        -o -name '.gitlab-ci.yml' \) -type f 2>/dev/null | head -n 50); do
+    found=1
+    # without a runner on this box a workflow file is just part of a checkout: it never runs here
+    [ "$runner" -eq 1 ] || { echo "workflow (no runner here, doesn't run on this box): $f"; continue; }
+    if grep -qE 'authorized_keys|useradd|sudoers|chpasswd|/dev/tcp|curl[[:space:]].*\|[[:space:]]*(ba)?sh' "$f" 2>/dev/null; then flag "workflow touches keys/users/sudo or pipes to a shell: $f"
+    elif grep -qE '^[[:space:]]*(schedule|-[[:space:]]*cron)[[:space:]]*:' "$f" 2>/dev/null; then flag "workflow runs on a schedule: $f ($(grep -hoE "cron:[[:space:]]*['\"][^'\"]+" "$f" | head -n1))"
+    else echo "workflow: $f"; fi
+done
+[ "$found" -eq 1 ] || echo "(no CI runner or workflow files found)"
+echo "(a runner can be a scored service: check which repo it pulls and who pushed last - git log -1 in its checkout)"
+
 section "Boot scripts (rc.local, init.d, OpenRC local.d)"
 for f in /etc/rc.local /etc/rc.d/rc.local; do
     [ -f "$f" ] || continue

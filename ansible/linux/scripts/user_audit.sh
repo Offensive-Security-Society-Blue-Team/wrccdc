@@ -142,7 +142,7 @@ SSHD_T=""
 have sshd && SSHD_T=$(sshd -T 2>/dev/null)
 if [ -n "$SSHD_T" ]; then
     echo "$SSHD_T" | awk '
-    $1 ~ /^(port|listenaddress|permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|authorizedkeysfile|authorizedkeyscommand|authorizedkeyscommanduser|allowusers|denyusers|allowgroups|usepam)$/ {
+    $1 ~ /^(port|listenaddress|permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|authorizedkeysfile|authorizedkeyscommand|authorizedkeyscommanduser|allowusers|denyusers|allowgroups|usepam|trustedusercakeys|authorizedprincipalsfile|revokedkeys)$/ {
         line = $0
         if ($1 == "permitemptypasswords" && $2 == "yes")                     line = "[!] " line
         if ($1 == "authorizedkeyscommand" && $2 != "none")                   line = "[!] " line "   <- keys come from a program"
@@ -160,6 +160,45 @@ else
 fi
 [ -n "$AKF" ] || AKF=".ssh/authorized_keys .ssh/authorized_keys2"
 ls /etc/ssh/sshd_config.d/ >/dev/null 2>&1 && echo "drop-in files: $(ls /etc/ssh/sshd_config.d/ | tr '\n' ' ')"
+# Every CA sshd trusts can sign a login certificate for ANY user (INV3: a forged
+# root cert was signed by an extra CA; vault-ca.conf / step-ca drop-ins added CAs).
+for f in $(echo "$SSHD_T" | awk '$1 == "trustedusercakeys" && $2 != "none" {print $2}'); do
+    echo "trusted user CA file: $f   (modified $(mtime "$f"))"
+    have ssh-keygen && grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | while IFS= read -r k; do
+        echo "    $(printf '%s\n' "$k" | ssh-keygen -lf - 2>/dev/null || echo "(unreadable line)")"
+    done
+done
+grep -lE '^[[:space:]]*TrustedUserCAKeys' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | while read -r f; do
+    echo "CA set in: $f"
+done
+
+section "PAM login stack (code that runs on every password check)"
+# A planted PAM module or pam_exec line can log every password typed, or let
+# any password in. Package-owned modules and stock lines are normal.
+PAMDIRS=$(ls -d /lib/security /lib64/security /usr/lib/security /usr/lib64/security /lib/*-linux-gnu/security /usr/lib/*-linux-gnu/security 2>/dev/null)
+if [ -d /etc/pam.d ]; then
+    grep -nE '^[^#]*(pam_exec|pam_script)' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "runs a program: $l"; done
+    grep -nE '^[^#]*auth[[:space:]]+sufficient[[:space:]]+pam_permit' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "lets any password in: $l"; done
+    grep -nE '^[^#]*[[:space:]](/[^[:space:]]+\.so)' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "module loaded by full path: $l"; done
+    find /etc/pam.d -type f -mtime "-${RECENT_DAYS:-2}" 2>/dev/null | while read -r f; do
+        echo "changed in the last ${RECENT_DAYS:-2} day(s): $f   ($(mtime "$f"))"
+    done
+    # modules no package installed (ask with and without /usr: merged-/usr boxes register one spelling)
+    mods=$(for d in $PAMDIRS; do find "$d" -maxdepth 1 -name '*.so' -type f 2>/dev/null; done | sed 's|^/usr/|/|' | sort -u)
+    if [ -n "$mods" ] && { have dpkg || have rpm || have apk; }; then
+        printf '%s\n' "$mods" | sed 'p; s|^/|/usr/|' | {
+            if have dpkg; then xargs -r dpkg -S 2>&1 >/dev/null | sed -n 's/^dpkg-query: no path found matching pattern //p'
+            elif have rpm; then xargs -r rpm -qf 2>&1 | sed -n -e 's/^file \(.*\) is not owned by any package$/\1/p' -e 's/^error: file \(.*\): No such file or directory$/\1/p'
+            else while read -r f; do [ -e "$f" ] || { echo "$f"; continue; }; apk info -W "$f" 2>/dev/null | grep -q 'owned by' || echo "$f"; done; fi
+        } | sed 's|^/usr/|/|' | sort | uniq -c | awk '$1 >= 2 {print $2}' | while read -r m; do
+            [ -f "/usr$m" ] && m="/usr$m"
+            flag "PAM module not from any package: $m   ($(mtime "$m"))"
+        done
+    fi
+    echo "(no [!] lines above = nothing odd in PAM)"
+else
+    echo "(no /etc/pam.d)"
+fi
 
 section "SSH authorized keys per account"
 echo "(every key here should be one your team knows about)"

@@ -20,7 +20,7 @@ ansible/linux/
 ├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
     ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
-    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, web shells
+    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, web shells, ptrace, backdoor ports
     ├── account_use.sh <user>  # READ-ONLY  is this account in use (logins, sudo, processes, history)
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today
@@ -28,7 +28,7 @@ ansible/linux/
     ├── harden.sh [opts]       # CHANGES    sshd, team keys, passwords, sudo, sysctl, perms, history, auditd + REVIEW list
     ├── lockdown_ssh.sh        # CHANGES    /etc/ssh/.ssh, red keys on root, AuthorizedKeysFile, root certs
     ├── revoke_certs.sh [ID..] # CHANGES    revoke forged SSH certs by key ID (default forged-root-cert)
-    ├── cleanup_persist.sh     # CHANGES    health-check timer, cron.d syshealth/sysintegrity, svc_health, red keys
+    ├── cleanup_persist.sh     # CHANGES    INV3 timers/cron/units/implants (dbus_session, devnode-syncd), svc_health, red keys
     ├── php2shell_mitigate.sh  # CHANGES    PHP2Shell stopgap ini in every conf.d + restart PHP/web
     ├── reissue_cert.sh ENV    # CHANGES    re-issue an EXPIRED step-ca TLS cert from its renew .env file
     ├── reissue_hostcert.sh    # CHANGES    re-issue EXPIRED SSH host certs from step-ca
@@ -118,10 +118,12 @@ ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/tea
 ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
 ```
 
-One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`UNKNOWN-KEYS=<n>(files)`, `RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION`, `DEVNODE-RUNNING`, or a file path). Read it like this:
+One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`UNKNOWN-KEYS=<n>(files)`, `RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION`, `DEVNODE-RUNNING`, `DBUS_SESSION-RUNNING`, `MEMFD-PROC=<pid>`, `SVC_HEALTH`, or a file path). Read it like this:
 - **`certauth=`** must stay at the scoring CA count. If it falls, scoring SSH breaks.
 - **`UNKNOWN-KEYS=`** counts keys that are neither a team key nor a `cert-authority` line, in every key file sshd reads. It catches keys like `root@localhost` that a list of known-bad names misses. Fix it with `./keys_pick.sh -l <host>`. Running verify_clean without key arguments falls back to the known INV3 red keys only (`RED-KEYS`).
 - **`RED-SESSION`**: someone is connected from a red team IP right now. `ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"`, then kill the PID, or on ss boxes `ss -K dst <ip>`.
+- **`MEMFD-PROC=<pid>`**: a program running from memory with no file on disk (the INV3 kvigindis implant). The clean-up pass does not kill these: look first with `./run.sh <host> implant_triage.sh`, then `kill <pid>` once you know what restarts it.
+- **`SVC_HEALTH`**: the red team account can log in again (real shell and unlocked password). Re-run `cleanup_persist.sh`, then find what re-created it (`cron_audit.sh`).
 - **Anything else:** re-run the clean-up pass on that host (`-l <host>`).
 
 Deeper look, when verify_clean is clean but something still feels off:
