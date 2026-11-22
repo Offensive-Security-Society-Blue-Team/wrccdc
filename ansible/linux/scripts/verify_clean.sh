@@ -61,5 +61,18 @@ case "$svcpw" in '!'*|'*'*) ;; *)
     awk -F: '$1 == "svc_health" && $7 !~ /(nologin|false)$/ {f=1} END {exit !f}' /etc/passwd 2>/dev/null && bad="$bad SVC_HEALTH" ;;
 esac
 grep -rhE '^[^#]*NOPASSWD:[[:space:]]*ALL' /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -q . && bad="$bad NOPASSWD-SUDO"
-{ ss -tn 2>/dev/null || netstat -tn 2>/dev/null; } | grep -qE '10\.194\.194\.85|10\.197\.207\.23' && bad="$bad RED-SESSION"
+# red team IP connected: list our port (22 = shell, 3306 = MySQL ...), or out:<port> when this box called out to them
+rp=$({ ss -tn 2>/dev/null || netstat -tn 2>/dev/null; } | awk '$5 ~ /(^|[^0-9.])10\.(194\.194\.85|197\.207\.23)\]?:[0-9]+$/ {
+        l = $4; sub(/.*:/, "", l); r = $5; sub(/.*:/, "", r); print (l + 0 >= 32768 ? "out:" r : l) }' | sort -u | tr '\n' ',')
+[ -n "$rp" ] && bad="$bad RED-SESSION=${rp%,}"
+# root can log in with ANY cert a TrustedUserCAKeys CA signs (INV3 forged-root-cert). Fix: lockdown_ssh.sh
+rcfg=$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null)
+tuca=$(printf '%s\n' "$rcfg" | awk '$1 == "trustedusercakeys" {print $2}')
+if [ -n "$tuca" ] && [ "$tuca" != none ] && [ "$(printf '%s\n' "$rcfg" | awk '$1 == "authorizedprincipalscommand" {print $2}')" = none ]; then
+    apf=$(printf '%s\n' "$rcfg" | awk '$1 == "authorizedprincipalsfile" {print $2}' | sed -e 's|%u|root|g' -e 's|%h|/root|g' -e 's|%%|%|g')
+    case "$apf" in none|'') bad="$bad ROOT-CERT-CA" ;;
+        *) case "$apf" in /*) ;; *) apf="/root/$apf" ;; esac
+           grep -qE '(^|[[:space:]])root[[:space:]]*$' "$apf" 2>/dev/null && bad="$bad ROOT-CERT-CA" ;;
+    esac
+fi
 echo "$(hostname): certauth=$c ${bad:-CLEAN}"
