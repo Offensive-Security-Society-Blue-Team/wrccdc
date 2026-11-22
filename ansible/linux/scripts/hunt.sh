@@ -135,6 +135,27 @@ find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type f -mtime
   | head -n 40 | while read -r f; do flag "$f   ($(ls -l "$f" | awk '{print $6, $7, $8}'))"; done
 echo "(a package update also triggers this - check against apt/dnf/apk history)"
 
+section "Package programs and libraries that no longer match their package (trojaned sshd, sudo, PAM, libc)"
+pkg_changed() {   # prints "<path> <why>"; dpkg/rpm column 1 has 5 in 3rd place = checksum differs, column 2 c/d/g/l/r = config/doc file
+    if have dpkg; then
+        nice dpkg --verify 2>/dev/null | awk '$1 ~ /^..5/ && $2 !~ /^[cdglr]$/ {print $NF, "checksum differs from the .deb"}'
+    elif have rpm; then
+        nice rpm -Va 2>/dev/null | awk '$1 ~ /^..5/ && $2 !~ /^[cdglr]$/ {print $NF, "checksum differs from the rpm"}'
+    elif have apk; then
+        apk audit --system 2>/dev/null | awk '$1 == "U" || $1 == "A" {p = $2; sub(/^\//, "", p)
+            print "/" p, ($1 == "U" ? "changed since apk installed it" : "in a system folder but not from any package")}'
+    fi
+}
+if have dpkg || have rpm || have apk; then
+    echo "(re-checks every installed file against the package: up to a couple of minutes)"
+    pkg_changed | grep -E '^/(usr/)?(s?bin|lib[^/ ]*)/' | grep -vE '\.pyc |/__pycache__/|^/(usr/)?lib/(modules|firmware)/' \
+        | head -n 40 | while read -r f why; do flag "$f   ($why)"; done
+    echo "(no [!] lines above = every program and library matches its package)"
+    echo "(boxes start clean, so a changed sshd, sudo, su, login, ps/ss/ls or pam_*.so is the red team: reinstall that package)"
+else
+    echo "(no dpkg, rpm or apk on this box)"
+fi
+
 # ---------------------------------------------------------------------------
 section "Web shells in web roots"
 for d in /var/www /srv/www /srv/http /usr/share/nginx/html /var/lib/gitea/custom; do

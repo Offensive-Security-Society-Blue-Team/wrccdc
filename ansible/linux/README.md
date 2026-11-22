@@ -20,7 +20,7 @@ ansible/linux/
 ├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
     ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
-    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, web shells, ptrace, backdoor ports
+    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, changed package files, web shells, ptrace, backdoor ports
     ├── account_use.sh <user>  # READ-ONLY  is this account in use (logins, sudo, processes, history)
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today

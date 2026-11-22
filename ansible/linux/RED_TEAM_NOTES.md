@@ -42,6 +42,7 @@ From our INV3 logs (`out/`, `logs/ansible.log`) unless marked otherwise.
 | Password sniffing via ptrace | write-up "Hawk": reads passwords out of sshd/sudo/su memory, so rotated passwords leak too | **hunt (traced processes)** |
 | Web shells, LFI, scanners | 2021 pcaps: Nessus, Nuclei, Shellshock user-agents, `../../etc/passwd`; write-ups: www-data running bash | hunt (web shells, **service accounts running shells**) |
 | Backdoor listeners | write-ups: unexpected ports like 4444, 2222 | **hunt (backdoor ports)** |
+| Trojaned programs / PAM modules | a swapped `pam_unix.so` or `sshd` that logs passwords (write-ups: PAM is a password-logging spot). Boxes start clean, so any changed package file is theirs | **hunt (package files that no longer match their package)** |
 | Blocking us / scoring | firewalld rich rules dropping `10.234.234.234` | by hand (`firewall-cmd --list-rich-rules`) |
 | Destructive (late in the day) | write-ups: delete `/etc/fstab` + reboot, drop DBs, stop services | 02_backup.yml, keep backups OFF the box |
 
