@@ -89,6 +89,10 @@ Every script prints its own examples with `-h`, and also when it's run with wron
 
 ## 2b. INV3 scripts (`ansible/linux/scripts/`, details in `ansible/linux/README.md`)
 
+**To keep or send the output, use `./run.sh <hosts> <script.sh> [args]` instead of `ansible ... -m script -a`.**
+It saves `out/<script>_<hosts>_<time>.txt` (one block per box, with errors). Passwords go to `loot/passwords/` instead.
+`./run.sh linux verify_clean.sh` · `./run.sh linux hunt.sh -g '=====|\[!\]'` · `./run.sh -h`
+
 ```bash
 # --- the main check, every 10-15 min: one line per box, CLEAN or what came back
 ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"

@@ -24,7 +24,12 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$LIMIT" ] || { echo "need -l <host or group>"; exit 1; }
 [ -f scripts/keys_apply.sh ] || { echo "scripts/keys_apply.sh not found (run from ~/wrccdc/ansible/linux)"; exit 1; }
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# everything printed below (table, your answers' results, per-box output) is also saved to out/, mode 0600
+mkdir -p out && chmod 700 out; umask 077
+SAVED="out/keys_pick_$(printf '%s' "$LIMIT" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)_$(date +%Y%m%d-%H%M%S)${CHECK:+_check}.txt"
+exec > >(tee "$SAVED") 2>&1
+echo "# ./keys_pick.sh -l $LIMIT ${CHECK} $([ "$YES" = 1 ] && echo -y) ${ROOTKEYS}   ran: $(date)"
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"; echo; echo "saved: $SAVED"' EXIT
 cat "${TEAMFILES[@]}" 2>/dev/null | awk '$2 ~ /^AAAA/ {print $2}' | sort -u > "$TMP/team.txt" || true
 
 echo "Collecting keys from $LIMIT ..."

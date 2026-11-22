@@ -17,6 +17,7 @@ ansible/linux/
 ├── 05_sshd.yml                # older sshd hardening; harden.sh replaces it in the run order
 ├── 06_wazuh.yml               # Wazuh manager on one box + agents everywhere else
 ├── files/agent.conf           # what Wazuh watches (pushed to every agent)
+├── run.sh                     # LAPTOP     run any scripts/*.sh on boxes + save the output to out/  <- use this
 ├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
     ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
@@ -35,6 +36,23 @@ ansible/linux/
     ├── user_audit.sh          # (used by 01_audit.yml)
     └── cron_audit.sh          # (used by 01_audit.yml)
 ```
+
+## Saving output (to keep, or to send to someone)
+
+Run scripts through `run.sh`. It works like `ansible <hosts> -m script -a ...`, but it always saves a clean copy:
+
+```bash
+./run.sh linux verify_clean.sh                    # team keys are filled in for you
+./run.sh linux hunt.sh -g '=====|\[!\]'           # screen: only the flags; file: everything
+./run.sh haf,djupi lockdown_ssh.sh
+./run.sh linux harden.sh --rotate '' --check
+```
+
+- **Where it goes:** `out/<script>_<hosts>_<time>.txt`, mode 0600. The file starts with the command and the time, then has one `##### <host>  rc=N  ok|FAILED|UNREACHABLE` block per box, with the script's errors underneath. Send that file as-is.
+- **New passwords** (`PW|` lines from harden.sh) are never written to `out/` or `logs/ansible.log`. They go to `loot/passwords/<script>_<time>.csv`. Don't send that file.
+- **`keys_pick.sh`** saves its own run to `out/keys_pick_<hosts>_<time>.txt` (the table, KEEP/REMOVE, and each box's result).
+- **Already saved:** `01_audit.yml` writes `out/<time>/`, and `02_backup.yml` writes `loot/backups/`.
+- **Options:** `-o FILE` picks the file name. Put `-g` and `-o` before the hosts.
 
 **Forgot how to run a script?** Every script takes `-h`: open it, or run `sh scripts/<name>.sh -h` on your laptop. A wrong argument, an unknown option, or (for scripts that change things) not being root makes it print the right command and exit with an error. Under Ansible that shows up as `FAILED` with the examples underneath.
 
