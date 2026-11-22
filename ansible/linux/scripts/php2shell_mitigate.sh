@@ -1,7 +1,25 @@
 #!/bin/sh
 # php2shell_mitigate.sh - STOPGAP for PHP2Shell (CVE-2026-109618/109619) until PHP is patched.
 # Drops 99-php2shell.ini into every PHP conf.d dir, then restarts PHP/web services. Undo: delete the file + restart.
+# Usage (from ansible/linux):
+#   ansible linux -m script -a scripts/php_find.sh                 # first: which boxes run PHP
+#   ansible skerja -m script -a scripts/php2shell_mitigate.sh      # then only those boxes
+# On a box:  sudo sh php2shell_mitigate.sh      Help: sh php2shell_mitigate.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: php2shell_mitigate.sh     (no arguments; CHANGES PHP config + restarts web; run as root)
+  ansible linux -m script -a scripts/php_find.sh             # find the PHP boxes first
+  ansible skerja -m script -a scripts/php2shell_mitigate.sh
+  sudo sh php2shell_mitigate.sh
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 echo "===== $(hostname) ====="
 n=0
 for d in /etc/php/*/*/conf.d /etc/php.d /etc/php[0-9]*/conf.d /usr/local/etc/php/conf.d; do

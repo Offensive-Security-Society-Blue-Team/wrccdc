@@ -1,6 +1,24 @@
 #!/bin/sh
 # reissue_hostcert.sh - re-issue EXPIRED SSH host certificates from step-ca (renew can't), same key/ID/principals.
+# Usage (from ansible/linux):
+#   ansible linux -m script -a scripts/reissue_hostcert.sh | grep -E "=====|OK|FAILED|skipped|reloaded"
+#   ansible kvigindis -m script -a scripts/reissue_hostcert.sh       # one box
+# On a box:  sudo sh reissue_hostcert.sh      Help: sh reissue_hostcert.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: reissue_hostcert.sh     (no arguments; CHANGES host certs + reloads sshd; run as root)
+  ansible linux -m script -a scripts/reissue_hostcert.sh | grep -E "=====|OK|FAILED|skipped|reloaded"
+  ansible kvigindis -m script -a scripts/reissue_hostcert.sh
+  sudo sh reissue_hostcert.sh
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 CA=https://ca.ice.land:9000; ROOT=/etc/step/root_ca.crt; PW=/etc/step/provisioner-password
 echo "===== $(hostname -s)"
 command -v step >/dev/null || { echo "no step CLI - skipped"; exit 0; }

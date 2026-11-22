@@ -6,11 +6,27 @@
 # Usage:   sudo sh hunt.sh | tee "hunt_$(hostname)_$(date +%H%M).txt"
 #          sudo RECENT_DAYS=1 sh hunt.sh
 #          ansible linux -K -b -m script -a scripts/hunt.sh      (all boxes)
+#          sh hunt.sh -h                                    (prints these examples)
 # Output:  [!] lines are leads, not proof. Changes NOTHING.
 # Works on: Debian/Ubuntu, RHEL/Rocky/Fedora, Alpine (busybox). POSIX sh.
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: hunt.sh        (no arguments; READ-ONLY; run as root for full results)
+  sudo sh hunt.sh | tee "hunt_$(hostname)_$(date +%H%M).txt"
+  sudo RECENT_DAYS=1 sh hunt.sh       # tighter "recently modified" window (days, default 2)
+  ansible linux -m script -a scripts/hunt.sh | grep -E "=====|\[!\]"      # every box, from ansible/linux
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+case "${RECENT_DAYS:-2}" in *[!0-9]*|"") usage "RECENT_DAYS must be a whole number of days (got: $RECENT_DAYS)" ;; esac
 RECENT_DAYS=${RECENT_DAYS:-2}
 
 flag()    { echo "[!] $*"; }
@@ -18,7 +34,7 @@ section() { printf '\n===== %s =====\n' "$1"; }
 have()    { command -v "$1" >/dev/null 2>&1; }
 cmdline() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | cut -c1-140; }
 
-[ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' processes and sockets will be hidden"
+[ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' processes and sockets will be hidden (run: sudo sh hunt.sh)"
 echo "host: $(hostname)   date: $(date)   'recent' = last $RECENT_DAYS day(s)"
 
 # Programs that should rarely own a network socket. A reverse shell is

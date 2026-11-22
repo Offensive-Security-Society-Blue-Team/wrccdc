@@ -77,25 +77,31 @@ ansible-playbook 02_backup.yml -l 'linux:!gufu'     # -> loot/backups/<host>-<ti
 ansible-playbook 03_keys.yml -k                     # team key on login account; after this no more -k
 ansible-playbook 04_passwords.yml --check           # preview, then run without --check -> loot/passwords/*.csv
 ansible-playbook 04_passwords.yml -e rotate_login_user=true      # also root (the login account)
-ansible-playbook 05_sshd.yml -l haf                 # one box, check scoring, then drop -l
+ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"   # 05 step: harden.sh replaces 05_sshd.yml
 ansible-playbook 06_wazuh.yml                       # manager + agents
 grep -h '^\[!\]' out/<time>/*.txt                   # flagged lines from 01
 ```
 Add `-l <host>` to test on one box, `--check --diff` to preview.
 
-`03_keys.yml -e wipe_other_keys=true` also deletes the scoring `cert-authority` line. Put it back:
-`ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`
+`03_keys.yml` only ADDS the team key now (`-e wipe_other_keys` was removed: it deleted the scoring `cert-authority` line).
+Remove other keys with `keys_pick.sh` (section 2b), which keeps CA lines by default.
+Every script prints its own examples with `-h`, and also when it's run with wrong arguments.
 
 ## 2b. INV3 scripts (`ansible/linux/scripts/`, details in `ansible/linux/README.md`)
 
 ```bash
 # --- the main check, every 10-15 min: one line per box, CLEAN or what came back
-ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"
+ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
+#     UNKNOWN-KEYS=n -> ./keys_pick.sh -l <host>    (no key args = only checks the known INV3 red keys)
 
 # --- clean-up pass (safe to re-run; try -l haf,djupi first)
+./keys_pick.sh -l linux --check                     # every key on every box, what WOULD go
+./keys_pick.sh -l linux                             # pick what to keep (Enter = team keys + CA lines)
 for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert" cleanup_persist.sh; do
   ansible linux -m script -a "scripts/$s"
 done | grep -E "=====|FIXED|REMOVED|LOCKED|CLEANED|FAILED|revoked IDs|cert-authority"
+ANSIBLE_LOG_PATH=/dev/null ansible linux -m script -a "scripts/harden.sh --rotate ''"       # no --rotate = NEW ROOT PASSWORD
+ANSIBLE_LOG_PATH=/dev/null ansible linux -m script -a "scripts/harden.sh --keys-b64 $(base64 -w0 files/team_key.pub) --exclude <scored,users>" | grep '^PW|'
 ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert <new-id>"    # another forged cert ID found
 
 # --- read-only digging

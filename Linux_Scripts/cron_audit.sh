@@ -2,8 +2,10 @@
 # cron_audit.sh - READ-ONLY audit of scheduled jobs and the other places
 # attackers hide "run this again later" persistence.
 #
-# Usage:   sudo sh cron_audit.sh | tee "cron_audit_$(hostname)_$(date +%H%M).txt"
+# Usage:   ansible-playbook 01_audit.yml    (every box, from ansible/linux)
+#          sudo sh cron_audit.sh | tee "cron_audit_$(hostname)_$(date +%H%M).txt"
 #          sudo RECENT_DAYS=1 sh cron_audit.sh     # change the "recently modified" window
+#          sh cron_audit.sh -h                 (prints these examples)
 # Output:  lines starting with [!] deserve a closer look. A flag is a lead,
 #          not proof - some legit jobs use curl/wget, for example.
 # Works on: Debian/Ubuntu, RHEL/CentOS/Rocky, Alpine (busybox). POSIX sh only.
@@ -11,6 +13,21 @@
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: cron_audit.sh        (no arguments; READ-ONLY; run as root for full results)
+  sudo sh cron_audit.sh | tee "cron_audit_$(hostname)_$(date +%H%M).txt"
+  sudo RECENT_DAYS=1 sh cron_audit.sh       # tighter "recently modified" window (days, default 2)
+  ansible-playbook 01_audit.yml                # every box, from ansible/linux
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+case "${RECENT_DAYS:-2}" in *[!0-9]*|"") usage "RECENT_DAYS must be a whole number of days (got: $RECENT_DAYS)" ;; esac
 
 RECENT_DAYS=${RECENT_DAYS:-2}
 
@@ -27,7 +44,7 @@ STRONG='(^|[^a-z])(nc|ncat|netcat|socat|telnet)[[:space:]]|/dev/(tcp|udp)/|(bash
 # Extra patterns that only make sense inside shell startup files.
 HOOKS='PROMPT_COMMAND|LD_PRELOAD|trap[[:space:]]|alias[[:space:]]+(sudo|su|ls|ps|ss|netstat|cat|passwd|ssh)='
 
-[ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' crontabs will be unreadable"
+[ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' crontabs will be unreadable (run: sudo sh cron_audit.sh)"
 echo "host: $(hostname)   date: $(date)   'recent' = modified in last $RECENT_DAYS day(s)"
 
 # Print the active (non-comment) lines of a crontab-style file, flagging

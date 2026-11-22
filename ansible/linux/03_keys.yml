@@ -6,13 +6,14 @@
 # leave the laptop they were made on. Do this BEFORE 04_passwords.yml, so a password
 # change can never lock you out.
 #
-#   ansible-playbook 03_keys.yml -k -K
-#   ansible-playbook 03_keys.yml -k -K -e wipe_other_keys=true
-#       ^ replaces that account's authorized_keys with ONLY the team key
-#         (kicks out keys red team planted; the old file is kept as a timestamped copy)
+#   ansible-playbook 03_keys.yml -k              # every box (add -K if debian logs in as a sudo user)
+#   ansible-playbook 03_keys.yml -k -l haf       # one box
 #
-# Only touches the login account (root on rhel/alpine, the sudo user on
-# debian). Other users' keys: check 01_audit.yml output and remove by hand.
+# Only ADDS keys to the login account (root on every box at INV3). To remove
+# the red team's keys, use keys_pick.sh afterwards. It shows every key on every
+# box and keeps the scoring cert-authority lines:
+#   ./keys_pick.sh -l linux --check   then   ./keys_pick.sh -l linux
+# (the old -e wipe_other_keys=true option was removed: it deleted the scoring CA line)
 
 - name: Install the team key on the Ansible login account
   hosts: linux
@@ -20,9 +21,17 @@
   gather_facts: true
   vars:
     key_user: "{{ ansible_user }}"
-    wipe_other_keys: false
     team_keys: "{{ lookup('file', team_pubkey_file).splitlines() | map('trim') | select | reject('match', '^#') | list }}"
   tasks:
+    - name: wipe_other_keys was removed
+      ansible.builtin.fail:
+        msg: >-
+          -e wipe_other_keys is gone (it deleted the scoring cert-authority line).
+          Run: ansible-playbook 03_keys.yml -k   then remove other keys with:
+          ./keys_pick.sh -l linux --check   and   ./keys_pick.sh -l linux
+      when: wipe_other_keys is defined
+      run_once: true
+
     - name: Team keys present? (one .pub line per person in files/team_key.pub)
       ansible.builtin.assert:
         that:
@@ -54,16 +63,6 @@
       loop: "{{ team_keys }}"
       loop_control:
         label: "{{ item.split() | last }}"     # show the key's comment (name), not the key
-      when: not (wipe_other_keys | bool)
-
-    - name: Replace authorized_keys with ONLY the team keys (old file kept as backup)
-      ansible.builtin.copy:
-        content: "{{ team_keys | join('\n') }}\n"
-        dest: "{{ home.stdout }}/.ssh/authorized_keys"
-        owner: "{{ key_user }}"
-        mode: "0600"
-        backup: true
-      when: wipe_other_keys | bool
 
     - name: Fix SELinux labels on Rocky/Fedora (wrong labels = key silently ignored)
       ansible.builtin.command: restorecon -R "{{ home.stdout }}/.ssh"

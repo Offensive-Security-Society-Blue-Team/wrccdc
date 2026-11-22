@@ -1,7 +1,9 @@
 #!/bin/sh
 # user_audit.sh - READ-ONLY audit of local accounts, privileges and SSH access.
 #
-# Usage:   sudo sh user_audit.sh | tee "user_audit_$(hostname)_$(date +%H%M).txt"
+# Usage:   ansible-playbook 01_audit.yml    (every box, from ansible/linux)
+#          sudo sh user_audit.sh | tee "user_audit_$(hostname)_$(date +%H%M).txt"
+#          sh user_audit.sh -h                 (prints these examples)
 # Output:  lines starting with [!] deserve a closer look. A flag is a lead,
 #          not proof of compromise - confirm before you lock/remove anything.
 # Works on: Debian/Ubuntu, RHEL/CentOS/Rocky, Alpine (busybox). POSIX sh only.
@@ -9,6 +11,19 @@
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: user_audit.sh        (no arguments; READ-ONLY; run as root for full results)
+  sudo sh user_audit.sh | tee "user_audit_$(hostname)_$(date +%H%M).txt"
+  ansible-playbook 01_audit.yml                # every box, from ansible/linux
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
 
 flag()    { echo "[!] $*"; }
 section() { printf '\n===== %s =====\n' "$1"; }
@@ -18,7 +33,7 @@ mtime()   { ls -ld "$1" 2>/dev/null | awk '{print $6, $7, $8}'; }
 # Shells that mean "this account cannot get an interactive login"
 NOLOGIN='(nologin|false|sync|shutdown|halt)$'
 
-[ "$(id -u)" -eq 0 ] || echo "[warn] not root: shadow, sudoers and other users' keys will be incomplete"
+[ "$(id -u)" -eq 0 ] || echo "[warn] not root: shadow, sudoers and other users' keys will be incomplete (run: sudo sh user_audit.sh)"
 echo "host: $(hostname)   date: $(date)   kernel: $(uname -r)"
 
 # UID_MIN = where "real human" UIDs start on this distro (1000 modern, 500 old RHEL)
