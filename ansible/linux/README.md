@@ -33,6 +33,7 @@ ansible/linux/
     ├── php2shell_mitigate.sh  # CHANGES    PHP2Shell stopgap ini in every conf.d + restart PHP/web
     ├── reissue_cert.sh ENV    # CHANGES    re-issue an EXPIRED step-ca TLS cert from its renew .env file
     ├── reissue_hostcert.sh    # CHANGES    re-issue EXPIRED SSH host certs from step-ca
+    ├── backup.sh [DIR]        # CHANGES    back up ONE box by hand when 02_backup.yml can't run (sudo sh backup.sh)
     ├── user_audit.sh          # (used by 01_audit.yml)
     └── cron_audit.sh          # (used by 01_audit.yml)
 ```

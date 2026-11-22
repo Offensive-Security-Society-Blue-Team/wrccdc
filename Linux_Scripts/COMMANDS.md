@@ -12,14 +12,17 @@ Internal 192.168.220.x, external 10.100.112.x.
 
 | Folder | What | Run from |
 |---|---|---|
-| `Linux_Scripts/` | bash scripts, copied onto one box and run by hand (sections 1 and 1b) | the box |
+| `Linux_Scripts/` | team enum / software / DNS / password scripts, copied onto one box and run by hand (section 1b) | the box |
 | `Linux_Scripts/Wazzuh/` | manual / offline Wazuh install and rule notes (section 13b) | the Wazuh box |
-| `ansible/linux/` | playbooks 00-06 + `scripts/` (verify_clean, lockdown, certs...) for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/` | playbooks 00-06 + `run.sh` / `keys_pick.sh` for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/scripts/` | every audit / fix script (hunt, user_audit, verify_clean, lockdown, backup...). Run on all boxes with `./run.sh`, or copy ONE onto a box and run it by hand (section 1) | either |
 | `ansible/windows/` | Windows playbooks (Windows teammates) | - |
 
 ---
 
-## 1. Audit scripts (all read-only except backup.sh)
+## 1. Audit scripts by hand on one box (all read-only except backup.sh)
+
+The scripts live in `ansible/linux/scripts/`. With Ansible working, use `./run.sh <hosts> <script.sh>` instead (section 2b).
 
 ```bash
 sudo sh user_audit.sh | tee ua_$(hostname)_$(date +%H%M).txt   # accounts, sudo, SSH keys, sshd
@@ -29,7 +32,8 @@ grep '^\[!\]' *.txt                                             # flagged lines 
 diff ua_box_0915.txt ua_box_1000.txt                            # what changed between two runs
 sudo sh backup.sh                                               # -> /var/tmp/bk-<host>-<time>.tgz, then scp it off
 ```
-Get a script onto a box without Ansible: `scp hunt.sh root@192.168.220.67:/root/`, or paste it in with `cat > hunt.sh << 'EOF'` … `EOF`.
+Get a script onto a box without Ansible: `scp ansible/linux/scripts/hunt.sh root@192.168.220.67:/root/`, or paste it in with `cat > hunt.sh << 'EOF'` … `EOF`.
+Not sure how to run one? `sh <script>.sh -h` prints examples.
 
 ## 1b. Team enum / password / DNS scripts (Linux_Scripts/)
 
