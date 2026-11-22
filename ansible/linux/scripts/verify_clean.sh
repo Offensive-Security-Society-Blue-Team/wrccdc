@@ -45,10 +45,21 @@ if [ $# -gt 0 ]; then
 fi
 grep -qE 'kali@kali|deploy@management|IMzLWB2|IGvYTas' /root/.ssh/authorized_keys 2>/dev/null && bad="$bad RED-KEYS"
 for f in /etc/cron.d/syshealth /etc/cron.d/sysintegrity /etc/systemd/system/health-check.service /etc/systemd/system/health-check.timer \
-         /usr/libexec/devnode-syncd /etc/ssh/sshrc /etc/profile.d/motd-display.sh /etc/ssh/banner.txt /root/lockdown_thorska.sh /root/.sys_bak /etc/ssh/.ssh; do
+         /usr/libexec/devnode-syncd /etc/ssh/sshrc /etc/profile.d/motd-display.sh /etc/ssh/banner.txt /root/lockdown_thorska.sh /root/.sys_bak /etc/ssh/.ssh \
+         /usr/lib/systemd/system/devnode-syncd.service /lib/systemd/system/devnode-syncd.service \
+         /usr/local/sbin/dbus_session /etc/systemd/system/systemd-journal-flush-helper.service /etc/systemd/system/kworker-gc.service \
+         /etc/systemd/system/*.service.d/zz-udev-cache.conf; do
     [ -e "$f" ] && bad="$bad $f"
 done
 pgrep devnode >/dev/null 2>&1 && bad="$bad DEVNODE-RUNNING"
+pgrep -x dbus_session >/dev/null 2>&1 && bad="$bad DBUS_SESSION-RUNNING"
+# fileless programs (run from memory, the INV3 kvigindis implant)
+for p in /proc/[0-9]*; do case "$(readlink "$p/exe" 2>/dev/null)" in *memfd:runc*|*memfd:crun*) ;; *memfd:*) bad="$bad MEMFD-PROC=${p#/proc/}"; break ;; esac; done
+# svc_health came back (cron/systemd/.bashrc re-create it): flag it if it can log in again
+svcpw=$(awk -F: '$1 == "svc_health" {print $2}' /etc/shadow 2>/dev/null)
+case "$svcpw" in '!'*|'*'*) ;; *)
+    awk -F: '$1 == "svc_health" && $7 !~ /(nologin|false)$/ {f=1} END {exit !f}' /etc/passwd 2>/dev/null && bad="$bad SVC_HEALTH" ;;
+esac
 grep -rhE '^[^#]*NOPASSWD:[[:space:]]*ALL' /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -q . && bad="$bad NOPASSWD-SUDO"
 { ss -tn 2>/dev/null || netstat -tn 2>/dev/null; } | grep -qE '10\.194\.194\.85|10\.197\.207\.23' && bad="$bad RED-SESSION"
 echo "$(hostname): certauth=$c ${bad:-CLEAN}"

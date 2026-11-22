@@ -1,7 +1,9 @@
 #!/bin/sh
 # cleanup_persist.sh - removes the INV3 red team persistence: health-check timer/service,
 # cron.d syshealth/sysintegrity, svc_health re-creation lines, deploy@management + kali@kali keys,
-# and locks svc_health. Everything removed is copied to /root/quarantine/persist.<time>. Safe to re-run.
+# the disguised implants (dbus_session via systemd-journal-flush-helper.service, kworker-gc.service,
+# devnode-syncd, zz-udev-cache.conf drop-ins), and locks svc_health.
+# Everything removed is copied to /root/quarantine/persist.<time>. Safe to re-run.
 # Usage (from ansible/linux):
 #   ansible linux -m script -a scripts/cleanup_persist.sh | grep -E "=====|REMOVED|LOCKED|CLEANED|cert-authority"
 #   ansible thorska -m script -a scripts/cleanup_persist.sh       # one box
@@ -30,6 +32,22 @@ for u in health-check.timer health-check.service; do
         mv "/etc/systemd/system/$u" "$Q/" && echo "REMOVED unit $u"
     fi
 done
+# INV3 implants hidden behind system-looking names (kvigindis, gufu, haf)
+for u in systemd-journal-flush-helper.service kworker-gc.service devnode-syncd.service; do
+    for d in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+        [ -f "$d/$u" ] && [ ! -L "$d/$u" ] || continue
+        systemctl disable --now "$u" >/dev/null 2>&1
+        mv "$d/$u" "$Q/$(echo "$d/$u" | tr / _)" && echo "REMOVED unit $d/$u"
+    done
+done
+for f in /etc/systemd/system/*.service.d/zz-udev-cache.conf; do
+    [ -f "$f" ] && mv "$f" "$Q/$(echo "$f" | tr / _)" && echo "REMOVED drop-in $f"
+done
+for b in /usr/local/sbin/dbus_session /usr/libexec/devnode-syncd; do
+    [ -e "$b" ] || continue
+    pkill -KILL -x "$(basename "$b")" 2>/dev/null
+    mv "$b" "$Q/$(basename "$b").bin" && chmod 000 "$Q/$(basename "$b").bin" && echo "REMOVED + killed $b"
+done
 command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null
 for f in /etc/cron.d/syshealth /etc/cron.d/sysintegrity; do
     [ -f "$f" ] && mv "$f" "$Q/" && echo "REMOVED $f"
@@ -46,6 +64,8 @@ done
 if id svc_health >/dev/null 2>&1; then
     pkill -KILL -u svc_health 2>/dev/null
     usermod -L -s /sbin/nologin svc_health 2>/dev/null || passwd -l svc_health >/dev/null 2>&1
+    # busybox (Alpine) has no usermod: set the shell by hand so it can't come back with keys
+    grep -q '^svc_health:.*:/bin/[a-z]*sh$' /etc/passwd && sed -i 's#^\(svc_health:.*:\)[^:]*$#\1/sbin/nologin#' /etc/passwd
     [ -f /etc/sudoers.d/svc_health ] && mv /etc/sudoers.d/svc_health "$Q/sudoers_svc_health"
     [ -f /home/svc_health/.ssh/authorized_keys ] && mv /home/svc_health/.ssh/authorized_keys "$Q/svc_health_authorized_keys"
     echo "LOCKED svc_health (no login, no keys, no sudo)"

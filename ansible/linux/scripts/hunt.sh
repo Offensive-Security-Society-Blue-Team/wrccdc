@@ -148,8 +148,44 @@ for d in /var/www /srv/www /srv/http /usr/share/nginx/html /var/lib/gitea/custom
         | while read -r f; do flag "web shell pattern: $f"; done
 done
 
+section "Processes being traced (ptrace: how tools like Hawk read passwords out of sshd/sudo/su)"
+found=0
+for p in /proc/[0-9]*; do
+    t=$(awk '/^TracerPid:/ {print $2}' "$p/status" 2>/dev/null)
+    [ -n "$t" ] && [ "$t" != 0 ] || continue
+    pid=${p#/proc/}
+    flag "pid $pid ($(cmdline "$pid")) is traced by pid $t: $(readlink "/proc/$t/exe" 2>/dev/null) $(cmdline "$t")"; found=1
+done
+[ "$found" -eq 1 ] || echo "(none)"
+echo "(strace/gdb you started yourself also show up here)"
+
+section "Service accounts running a shell or interpreter (e.g. www-data running bash = web shell)"
+SVC_USERS='^(www-data|apache|nginx|http|httpd|lighttpd|nobody|mysql|mariadb|postgres|git|gitea|redis|tomcat|jenkins|nextcloud|php-fpm|caddy|ftp)$'
+found=0
+for p in /proc/[0-9]*; do
+    c=$(cat "$p/comm" 2>/dev/null) || continue
+    case "$c" in sh|bash|dash|ash|zsh|ksh|python*|perl|ruby|lua*|nc|ncat|netcat|socat|telnet|busybox) ;; *) continue ;; esac
+    uid=$(awk '/^Uid:/ {print $2}' "$p/status" 2>/dev/null)
+    u=$(awk -F: -v i="$uid" '$3 == i {print $1; exit}' /etc/passwd)
+    printf '%s\n' "$u" | grep -qE "$SVC_USERS" || continue
+    pid=${p#/proc/}
+    flag "pid $pid user=$u runs $c: $(cmdline "$pid")   parent: $(cmdline "$(awk '/^PPid:/ {print $2}' "$p/status")")"; found=1
+done
+[ "$found" -eq 1 ] || echo "(none)"
+echo "(git/gitea running sh for hooks, or php-fpm calling sh for mail, can be normal - look at the command)"
+
+section "Listening on classic backdoor / C2 ports"
+LIST=$( { ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null; } )
+found=0
+for port in 1337 2222 4444 4445 5555 6666 6667 7777 9999 12345 31337 50050; do
+    printf '%s\n' "$LIST" | grep -qE "[:.]$port[[:space:]]" && { flag "something listens on $port: $(printf '%s\n' "$LIST" | grep -E "[:.]$port[[:space:]]" | head -n1 | tr -s ' ')"; found=1; }
+done
+[ "$found" -eq 1 ] || echo "(none)"
+echo "(2222 is sometimes Gitea's own SSH - check the program name)"
+
 section "Containers"
 if have docker; then docker ps 2>/dev/null || echo "(docker present but not reachable)"; else echo "(no docker)"; fi
+have podman && { echo "-- podman"; podman ps -a 2>/dev/null || echo "(podman present but not reachable)"; }
 
 echo
 echo "done. grep '^\[!\]' to see only flagged lines."
