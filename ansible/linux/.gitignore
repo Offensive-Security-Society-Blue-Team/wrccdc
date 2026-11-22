@@ -4,3 +4,4 @@ logs/*
 !logs/.gitkeep
 *.retry
 files/team_key.pub
+*_[0-9][0-9][0-9][0-9].txt
