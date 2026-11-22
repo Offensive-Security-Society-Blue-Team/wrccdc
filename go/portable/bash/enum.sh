@@ -9,6 +9,8 @@
 #   sudo ./enum.sh -out /root/enum.txt
 #
 # Flag: -out / --out  (default: $TMPDIR/<host>-enum.txt)
+# suggested addon: -out - prints the report to stdout instead of a file
+#   (e.g. ansible linux -m script -a "go/portable/bash/enum.sh -out -")
 set -u
 
 HOST="$(hostname 2>/dev/null || echo unknown)"
@@ -109,6 +111,9 @@ run_sec "Recent logins (last)" last -n 40
 run_sec "Open network files (lsof -i)" lsof -i -n -P
 run_sec "Interfaces (ip addr)" ip addr
 run_sec "Routes (ip route)" ip route
+# suggested addon: DNS resolvers and static host entries
+file_sec "DNS resolvers" /etc/resolv.conf
+file_sec "Hosts file" /etc/hosts
 run_sec "Mounts" mount
 run_sec "Disk usage" df -h
 
@@ -124,6 +129,20 @@ case "$DISTRO" in
     elif have apk; then run_sec "Installed packages (apk)" apk info -v; fi;;
 esac
 
+# suggested addon: versions of common (often scored) services, only those installed
+{
+  body="$(for c in "nginx -v" "apache2 -v" "httpd -v" "php -v" "mysql --version" "mariadb --version" \
+      "psql --version" "ssh -V" "gitea --version" "named -v" "smbd --version" "docker --version" "podman --version"; do
+    set -- $c
+    # skip busybox applets: busybox "httpd -v" starts a web server instead of printing a version
+    case "$(command -v "$1")" in */*) ;; *) continue;; esac
+    case "$(readlink -f "$(command -v "$1")" 2>/dev/null)" in */busybox) continue;; esac
+    have "$1" && printf '%s: %s\n' "$1" "$("$@" </dev/null 2>&1 | head -n 1)"
+  done)"
+  [ -z "$body" ] && body="(none of the common services found)"
+  printf '%s' "$body"
+} | sec "Service versions"
+
 # --- File-based sections ---
 file_sec "Crontab (system)" /etc/crontab
 glob_sec "Cron jobs (/etc/cron.d)" /etc/cron.d
@@ -133,6 +152,27 @@ glob_sec "Netplan" /etc/netplan
 file_sec "SSH server config" /etc/ssh/sshd_config
 file_sec "fstab" /etc/fstab
 
+# suggested addon: which sites are served from where (nginx / apache / caddy config)
+{
+  body="$(for d in /etc/nginx /etc/apache2 /etc/httpd /etc/caddy; do
+    [ -d "$d" ] && grep -rhsE '^[[:space:]]*(server_name|root|listen|DocumentRoot|ServerName|ServerAlias|<VirtualHost|reverse_proxy)[[:space:]]' "$d" \
+      | sed 's/^[[:space:]]*//' | sort -u | sed "s|^|$d: |"
+  done)"
+  [ -z "$body" ] && body="(no nginx/apache/caddy config found)"
+  printf '%s' "$body"
+} | sec "Web sites (names, roots, ports)"
+
+# suggested addon: containers (Docker and Podman)
+have docker && run_sec "Containers (docker)" docker ps -a
+have podman && run_sec "Containers (podman)" podman ps -a
+
+# suggested addon: OpenWrt routers (uci config + boot services)
+if have uci; then
+  run_sec "OpenWrt network (uci)" uci show network
+  run_sec "OpenWrt firewall (uci)" uci show firewall
+  { ls -l /etc/rc.d 2>/dev/null || printf '(no /etc/rc.d)'; } | sec "OpenWrt boot services (/etc/rc.d)"
+fi
+
 # --- World-writable files (bounded search) ---
 {
   body="$(find /etc /var/www /srv /home -xdev -type f -perm -0002 -ls 2>/dev/null)"
@@ -141,6 +181,8 @@ file_sec "fstab" /etc/fstab
 } | sec "World-writable files (common paths)"
 
 umask 077
+# suggested addon: -out - prints the report to stdout instead of writing a file
+if [ "$OUT" = "-" ]; then cat "$TMP"; rm -f "$TMP"; good "enumeration printed to stdout"; exit 0; fi
 mv "$TMP" "$OUT" 2>/dev/null || cp "$TMP" "$OUT"
 chmod 600 "$OUT" 2>/dev/null
 good "enumeration written to $OUT"
