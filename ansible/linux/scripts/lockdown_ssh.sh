@@ -6,8 +6,25 @@
 #  4. block certificate logins as root (forged-root-cert)
 #  5. check the config with sshd -t, then reload (restores the backup if it fails)
 #  6. show live connections that are NOT our VPN address (192.168.220.3)
-# Run on all boxes:  ansible linux -m script -a scripts/lockdown_ssh.sh
+# Usage (from ansible/linux):
+#   ansible haf,djupi -m script -a scripts/lockdown_ssh.sh     # try two boxes first
+#   ansible linux -m script -a scripts/lockdown_ssh.sh | grep -E "=====|FIXED|FAILED|ok:"
+# On a box:  sudo sh lockdown_ssh.sh      Help: sh lockdown_ssh.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: lockdown_ssh.sh     (no arguments; CHANGES sshd; run as root)
+  ansible haf,djupi -m script -a scripts/lockdown_ssh.sh
+  ansible linux -m script -a scripts/lockdown_ssh.sh | grep -E "=====|FIXED|FAILED|ok:"
+  sudo sh lockdown_ssh.sh
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 Q=/root/quarantine; T=$(date +%H%M%S); C=/etc/ssh/sshd_config
 mkdir -p "$Q"
 echo "===== $(hostname) ====="

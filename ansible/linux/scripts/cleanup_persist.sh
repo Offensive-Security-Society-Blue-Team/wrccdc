@@ -2,7 +2,25 @@
 # cleanup_persist.sh - removes the INV3 red team persistence: health-check timer/service,
 # cron.d syshealth/sysintegrity, svc_health re-creation lines, deploy@management + kali@kali keys,
 # and locks svc_health. Everything removed is copied to /root/quarantine/persist.<time>. Safe to re-run.
+# Usage (from ansible/linux):
+#   ansible linux -m script -a scripts/cleanup_persist.sh | grep -E "=====|REMOVED|LOCKED|CLEANED|cert-authority"
+#   ansible thorska -m script -a scripts/cleanup_persist.sh       # one box
+# On a box:  sudo sh cleanup_persist.sh      Help: sh cleanup_persist.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: cleanup_persist.sh     (no arguments; CHANGES the box; run as root)
+  ansible linux -m script -a scripts/cleanup_persist.sh | grep -E "=====|REMOVED|LOCKED|CLEANED|cert-authority"
+  ansible thorska -m script -a scripts/cleanup_persist.sh
+  sudo sh cleanup_persist.sh
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 Q=/root/quarantine/persist.$(date +%H%M%S); mkdir -p "$Q"
 BAD='id -u svc_health|svc_health ALL=|deploy@management|kali@kali|# system health monitor'
 echo "===== $(hostname) ====="

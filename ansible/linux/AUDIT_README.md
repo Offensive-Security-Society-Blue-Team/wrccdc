@@ -12,7 +12,7 @@ ccdc-audit/
     └── cron_audit.sh      # cron, at, systemd timers/units, rc.local, shell hooks, ld.so.preload
 ```
 
-POSIX `sh`. Tested on Ubuntu 24.04 with dash and busybox ash. Written to also run on
+Run any script with `-h` to see how it's meant to be run. POSIX `sh`. Tested on Ubuntu 24.04 with dash and busybox ash. Written to also run on
 RHEL-family and Alpine (paths for each are handled).
 
 ## Run by hand on one box
@@ -37,7 +37,7 @@ Results: `out/<timestamp>/<host>-user_audit.txt` and `-cron_audit.txt` (mode 060
 **After the first pass, use `verify_clean.sh` and `hunt.sh` instead of re-running 01.** At INV3, 01 was run at the start and once after the first fixes. After that, checks were one line per box:
 
 ```bash
-ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"   # every 10-15 min
+ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"   # every 10-15 min
 ansible linux -m script -a "scripts/hunt.sh" | tee out/hunt_$(date +%H%M).txt | grep -E "=====|\[!\]"
 ```
 

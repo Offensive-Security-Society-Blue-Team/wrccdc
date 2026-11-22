@@ -2,8 +2,26 @@
 # implant_triage.sh [name] - READ-ONLY. Finds in-memory (fileless) programs and a
 # planted binary (default name: dbus_session): what runs, who started it, where it
 # connects, and what restarts it. Changes nothing.
-# Run on all boxes:  ansible linux -m script -a "scripts/implant_triage.sh dbus_session"
+# Usage (from ansible/linux):
+#   ansible linux -m script -a "scripts/implant_triage.sh"                 # default name dbus_session
+#   ansible linux -m script -a "scripts/implant_triage.sh devnode-syncd"   # another planted binary name
+# On a box:  sudo sh implant_triage.sh [name]      Help: sh implant_triage.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: implant_triage.sh [name]     (READ-ONLY; name of the planted binary, default dbus_session; run as root)
+  ansible linux -m script -a "scripts/implant_triage.sh"
+  ansible linux -m script -a "scripts/implant_triage.sh devnode-syncd"
+  sudo sh implant_triage.sh dbus_session
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -le 1 ] || usage "give at most one binary name"
+case "${1:-}" in -*) usage "unknown option: $1" ;; esac
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 N=${1:-dbus_session}
 echo "===== $(hostname) ====="
 NET=$( { ss -tunap 2>/dev/null || netstat -tunap 2>/dev/null; } )

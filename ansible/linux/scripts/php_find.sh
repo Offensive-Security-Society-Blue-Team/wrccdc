@@ -1,6 +1,21 @@
 #!/bin/sh
 # php_find.sh - READ-ONLY. Shows PHP versions, how PHP is served, and web files changed today.
+# Usage (from ansible/linux):  ansible linux -m script -a scripts/php_find.sh
+# On a box:  sudo sh php_find.sh      Help: sh php_find.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: php_find.sh     (no arguments; READ-ONLY)
+  ansible linux -m script -a scripts/php_find.sh
+  sudo sh php_find.sh
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+[ "$(id -u)" -eq 0 ] || echo "[warn] not root: docker and some web roots will be hidden (run: sudo sh php_find.sh)" >&2
 echo "===== $(hostname) ====="
 found=0
 for b in /usr/bin/php* /usr/sbin/php-fpm* /usr/local/bin/php* /usr/local/sbin/php-fpm*; do

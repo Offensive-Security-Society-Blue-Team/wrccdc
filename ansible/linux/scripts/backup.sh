@@ -4,7 +4,8 @@
 # when root can reach them, into one archive.
 #
 # Usage:   sudo sh backup.sh               # archive goes to /var/tmp
-#          sudo sh backup.sh /some/dir
+#          sudo sh backup.sh /some/dir     # dir must already exist
+#          sh backup.sh -h                 # prints these examples
 # Then copy it OFF the box and delete it from the box:
 #          scp root@<box>:/var/tmp/bk-<host>-<time>.tgz .
 # It holds /etc/shadow and database dumps: treat it like a password file.
@@ -15,7 +16,22 @@
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-[ "$(id -u)" -eq 0 ] || { echo "run as root (sudo sh backup.sh)"; exit 1; }
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: backup.sh [DIR]     (run as root; archive goes to DIR, default /var/tmp)
+  sudo sh backup.sh
+  sudo sh backup.sh /root/bk
+  then: scp root@<box>:/var/tmp/bk-<host>-<time>.tgz .
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -le 1 ] || usage "only one argument: the folder to write the archive to"
+case "${1:-}" in -*) usage "unknown option: $1" ;; esac
+[ -z "${1:-}" ] || [ -d "$1" ] || usage "$1 is not a folder"
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 
 dest=${1:-/var/tmp}
 ts=$(date +%Y%m%d-%H%M%S)

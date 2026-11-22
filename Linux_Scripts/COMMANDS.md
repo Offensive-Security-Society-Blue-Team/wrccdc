@@ -12,14 +12,17 @@ Internal 192.168.220.x, external 10.100.112.x.
 
 | Folder | What | Run from |
 |---|---|---|
-| `Linux_Scripts/` | bash scripts, copied onto one box and run by hand (sections 1 and 1b) | the box |
+| `Linux_Scripts/` | team enum / software / DNS / password scripts, copied onto one box and run by hand (section 1b) | the box |
 | `Linux_Scripts/Wazzuh/` | manual / offline Wazuh install and rule notes (section 13b) | the Wazuh box |
-| `ansible/linux/` | playbooks 00-06 + `scripts/` (verify_clean, lockdown, certs...) for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/` | playbooks 00-06 + `run.sh` / `keys_pick.sh` for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/scripts/` | every audit / fix script (hunt, user_audit, verify_clean, lockdown, backup...). Run on all boxes with `./run.sh`, or copy ONE onto a box and run it by hand (section 1) | either |
 | `ansible/windows/` | Windows playbooks (Windows teammates) | - |
 
 ---
 
-## 1. Audit scripts (all read-only except backup.sh)
+## 1. Audit scripts by hand on one box (all read-only except backup.sh)
+
+The scripts live in `ansible/linux/scripts/`. With Ansible working, use `./run.sh <hosts> <script.sh>` instead (section 2b).
 
 ```bash
 sudo sh user_audit.sh | tee ua_$(hostname)_$(date +%H%M).txt   # accounts, sudo, SSH keys, sshd
@@ -29,7 +32,8 @@ grep '^\[!\]' *.txt                                             # flagged lines 
 diff ua_box_0915.txt ua_box_1000.txt                            # what changed between two runs
 sudo sh backup.sh                                               # -> /var/tmp/bk-<host>-<time>.tgz, then scp it off
 ```
-Get a script onto a box without Ansible: `scp hunt.sh root@192.168.220.67:/root/`, or paste it in with `cat > hunt.sh << 'EOF'` … `EOF`.
+Get a script onto a box without Ansible: `scp ansible/linux/scripts/hunt.sh root@192.168.220.67:/root/`, or paste it in with `cat > hunt.sh << 'EOF'` … `EOF`.
+Not sure how to run one? `sh <script>.sh -h` prints examples.
 
 ## 1b. Team enum / password / DNS scripts (Linux_Scripts/)
 
@@ -77,25 +81,35 @@ ansible-playbook 02_backup.yml -l 'linux:!gufu'     # -> loot/backups/<host>-<ti
 ansible-playbook 03_keys.yml -k                     # team key on login account; after this no more -k
 ansible-playbook 04_passwords.yml --check           # preview, then run without --check -> loot/passwords/*.csv
 ansible-playbook 04_passwords.yml -e rotate_login_user=true      # also root (the login account)
-ansible-playbook 05_sshd.yml -l haf                 # one box, check scoring, then drop -l
+ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"   # step 05 (05_sshd.yml was removed)
 ansible-playbook 06_wazuh.yml                       # manager + agents
 grep -h '^\[!\]' out/<time>/*.txt                   # flagged lines from 01
 ```
 Add `-l <host>` to test on one box, `--check --diff` to preview.
 
-`03_keys.yml -e wipe_other_keys=true` also deletes the scoring `cert-authority` line. Put it back:
-`ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`
+`03_keys.yml` only ADDS the team key now (`-e wipe_other_keys` was removed: it deleted the scoring `cert-authority` line).
+Remove other keys with `keys_pick.sh` (section 2b), which keeps CA lines by default.
+Every script prints its own examples with `-h`, and also when it's run with wrong arguments.
 
 ## 2b. INV3 scripts (`ansible/linux/scripts/`, details in `ansible/linux/README.md`)
 
+**To keep or send the output, use `./run.sh <hosts> <script.sh> [args]` instead of `ansible ... -m script -a`.**
+It saves `out/<script>_<hosts>_<time>.txt` (one block per box, with errors). Passwords go to `loot/passwords/` instead.
+`./run.sh linux verify_clean.sh` · `./run.sh linux hunt.sh -g '=====|\[!\]'` · `./run.sh -h`
+
 ```bash
 # --- the main check, every 10-15 min: one line per box, CLEAN or what came back
-ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"
+ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
+#     UNKNOWN-KEYS=n -> ./keys_pick.sh -l <host>    (no key args = only checks the known INV3 red keys)
 
 # --- clean-up pass (safe to re-run; try -l haf,djupi first)
+./keys_pick.sh -l linux --check                     # every key on every box, what WOULD go
+./keys_pick.sh -l linux                             # pick what to keep (Enter = team keys + CA lines)
 for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert" cleanup_persist.sh; do
   ansible linux -m script -a "scripts/$s"
 done | grep -E "=====|FIXED|REMOVED|LOCKED|CLEANED|FAILED|revoked IDs|cert-authority"
+ANSIBLE_LOG_PATH=/dev/null ansible linux -m script -a "scripts/harden.sh --rotate ''"       # no --rotate = NEW ROOT PASSWORD
+ANSIBLE_LOG_PATH=/dev/null ansible linux -m script -a "scripts/harden.sh --keys-b64 $(base64 -w0 files/team_key.pub) --exclude <scored,users>" | grep '^PW|'
 ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert <new-id>"    # another forged cert ID found
 
 # --- read-only digging

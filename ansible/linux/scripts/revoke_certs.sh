@@ -1,7 +1,27 @@
 #!/bin/sh
 # revoke_certs.sh [ID ...] - revoke forged SSH certificates by their key ID (default: forged-root-cert).
 # Scoring certificates have other IDs, so they keep working. Safe to re-run; add IDs as you find them.
+# Usage (from ansible/linux):
+#   ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert"
+#   ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert <new-id>"   # more forged IDs
+# On a box:  sudo sh revoke_certs.sh forged-root-cert      Help: sh revoke_certs.sh -h
+# Another CA:  CA_FP=SHA256:... sh revoke_certs.sh <id>
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: revoke_certs.sh [ID ...]     (SSH cert key IDs to revoke, default forged-root-cert; CHANGES sshd; run as root)
+  ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert"
+  ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert <new-id>"
+  sudo sh revoke_certs.sh forged-root-cert
+See a cert's ID with: ssh-keygen -L -f <cert>-cert.pub | grep "Key ID"
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+for a in "$@"; do case "$a" in -*) usage "unknown option: $a (IDs only)" ;; esac; done
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
 C=/etc/ssh/sshd_config; K=/etc/ssh/revoked_keys; S=/etc/ssh/revoked_ids.txt
 Q=/root/quarantine; T=$(date +%H%M%S); mkdir -p "$Q"
 echo "===== $(hostname) ====="

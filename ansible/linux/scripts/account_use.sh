@@ -1,9 +1,27 @@
 #!/bin/sh
 # account_use.sh <user> - READ-ONLY: is this account in use? Logged in now, recent
 # logins, SSH logins + sudo use from the logs, running processes, last commands.
-# Run on every box:  ansible linux -m script -a "scripts/account_use.sh admin"
+# Usage (from ansible/linux):
+#   ansible linux -m script -a "scripts/account_use.sh svc_health"   # every box
+#   ansible haf   -m script -a "scripts/account_use.sh admin"        # one box
+# On a box:  sudo sh account_use.sh svc_health      Help: sh account_use.sh -h
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-U=${1:?usage: account_use.sh <user>}
+usage() {
+    [ -n "${1:-}" ] && echo "error: $1" >&2
+    cat >&2 <<'USAGE'
+usage: account_use.sh <user>     (one account name; run as root)
+  ansible linux -m script -a "scripts/account_use.sh svc_health"
+  ansible haf   -m script -a "scripts/account_use.sh admin"
+  sudo sh account_use.sh svc_health
+USAGE
+    [ -n "${1:-}" ] && exit 1
+    exit 0
+}
+case "${1:-}" in -h|--help) usage ;; esac
+[ $# -eq 1 ] || usage "give exactly one account name"
+case "$1" in -*|"") usage "not an account name: $1" ;; esac
+[ "$(id -u)" -eq 0 ] || usage "must run as root"
+U=$1
 echo "===== $(hostname): account '$U' ====="
 if grep -q "^$U:" /etc/passwd; then grep "^$U:" /etc/passwd; id "$U" 2>/dev/null
 else echo "(no local account '$U' - may still be a domain/AD account)"; fi

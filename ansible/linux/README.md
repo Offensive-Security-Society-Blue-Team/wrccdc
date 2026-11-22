@@ -14,24 +14,47 @@ ansible/linux/
 ├── 02_backup.yml              # /etc, web roots, DB dumps -> loot/backups/
 ├── 03_keys.yml                # team SSH key on the login account + proves it works
 ├── 04_passwords.yml           # new random passwords -> loot/passwords/*.csv
-├── 05_sshd.yml                # safe sshd hardening (validated, keeps password login)
 ├── 06_wazuh.yml               # Wazuh manager on one box + agents everywhere else
 ├── files/agent.conf           # what Wazuh watches (pushed to every agent)
+├── run.sh                     # LAPTOP     run any scripts/*.sh on boxes + save the output to out/  <- use this
+├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
-    ├── verify_clean.sh        # READ-ONLY  one line per box: CLEAN or what came back  <- the main check
+    ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
     ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, web shells
     ├── account_use.sh <user>  # READ-ONLY  is this account in use (logins, sudo, processes, history)
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today
+    ├── keys_apply.sh          # CHANGES    on-box half of keys_pick.sh (don't run it by hand)
+    ├── harden.sh [opts]       # CHANGES    sshd, team keys, passwords, sudo, sysctl, perms, history, auditd + REVIEW list
     ├── lockdown_ssh.sh        # CHANGES    /etc/ssh/.ssh, red keys on root, AuthorizedKeysFile, root certs
     ├── revoke_certs.sh [ID..] # CHANGES    revoke forged SSH certs by key ID (default forged-root-cert)
     ├── cleanup_persist.sh     # CHANGES    health-check timer, cron.d syshealth/sysintegrity, svc_health, red keys
     ├── php2shell_mitigate.sh  # CHANGES    PHP2Shell stopgap ini in every conf.d + restart PHP/web
     ├── reissue_cert.sh ENV    # CHANGES    re-issue an EXPIRED step-ca TLS cert from its renew .env file
     ├── reissue_hostcert.sh    # CHANGES    re-issue EXPIRED SSH host certs from step-ca
+    ├── backup.sh [DIR]        # CHANGES    back up ONE box by hand when 02_backup.yml can't run (sudo sh backup.sh)
     ├── user_audit.sh          # (used by 01_audit.yml)
     └── cron_audit.sh          # (used by 01_audit.yml)
 ```
+
+## Saving output (to keep, or to send to someone)
+
+Run scripts through `run.sh`. It works like `ansible <hosts> -m script -a ...`, but it always saves a clean copy:
+
+```bash
+./run.sh linux verify_clean.sh                    # team keys are filled in for you
+./run.sh linux hunt.sh -g '=====|\[!\]'           # screen: only the flags; file: everything
+./run.sh haf,djupi lockdown_ssh.sh
+./run.sh linux harden.sh --rotate '' --check
+```
+
+- **Where it goes:** `out/<script>_<hosts>_<time>.txt`, mode 0600. The file starts with the command and the time, then has one `##### <host>  rc=N  ok|FAILED|UNREACHABLE` block per box, with the script's errors underneath. Send that file as-is.
+- **New passwords** (`PW|` lines from harden.sh) are never written to `out/` or `logs/ansible.log`. They go to `loot/passwords/<script>_<time>.csv`. Don't send that file.
+- **`keys_pick.sh`** saves its own run to `out/keys_pick_<hosts>_<time>.txt` (the table, KEEP/REMOVE, and each box's result).
+- **Already saved:** `01_audit.yml` writes `out/<time>/`, and `02_backup.yml` writes `loot/backups/`.
+- **Options:** `-o FILE` picks the file name. Put `-g` and `-o` before the hosts.
+
+**Forgot how to run a script?** Every script takes `-h`: open it, or run `sh scripts/<name>.sh -h` on your laptop. A wrong argument, an unknown option, or (for scripts that change things) not being root makes it print the right command and exit with an error. Under Ansible that shows up as `FAILED` with the examples underneath.
 
 ## Setup (the night before)
 
@@ -58,7 +81,7 @@ ansible-inventory --graph      # should show debian / rhel / alpine under linux
 | 02 | `ansible-playbook 02_backup.yml` | `saved loot/backups/<host>-<time>.tgz` per box |
 | 03 | `ansible-playbook 03_keys.yml -k` | `KEY LOGIN OK` per box. From here on `-k` is no longer needed. |
 | 04 | `ansible-playbook 04_passwords.yml --check`, then without `--check` | the CHANGING / skipped lists, then `loot/passwords/<host>-<time>.csv` |
-| 05 | `ansible-playbook 05_sshd.yml -l haf`, check scoring, then all | effective sshd settings printed; `permitemptypasswords no` |
+| 05 | `ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"`, then without `--check`, check scoring, then `linux` | `DONE:` / `WOULD:` lines, `sshd now:` settings, and a `REVIEW:` list for a human to decide |
 | 06 | `ansible-playbook 06_wazuh.yml` | manager version, then an agent list with every box `Active` |
 
 **`-k` and `-K`:** `-k` asks for the SSH password, which you only need until 03 has run. `-K` asks for the sudo password, only needed if `[debian:vars]` logs in as a sudo user instead of root.
@@ -66,28 +89,38 @@ ansible-inventory --graph      # should show debian / rhel / alpine under linux
 
 ## Clean-up pass (after 03, once you know the red team's tricks)
 
-These are the INV3 fixes as scripts. Run them in this order, on one or two boxes first (`-l haf,djupi`), then on `linux`:
+Run these in order, on one or two boxes first (`-l haf,djupi`), then on `linux`:
 
 ```bash
+./keys_pick.sh -l linux --check        # table of every key on every box + what WOULD be removed
+./keys_pick.sh -l linux                # pick the numbers to keep (Enter = team keys + CA lines), confirm
 for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert" cleanup_persist.sh; do
   ansible linux -m script -a "scripts/$s"
 done | grep -E "=====|FIXED|REMOVED|LOCKED|CLEANED|FAILED|revoked IDs|cert-authority"
-ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"
+ANSIBLE_LOG_PATH=/dev/null ansible linux -m script -a "scripts/harden.sh --rotate ''"
+ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
 ```
 
+- **`keys_pick.sh`** (on your laptop) lists every SSH key on every box in one table. That includes each account's `~/.ssh`, any `AuthorizedKeysFile` path and `/etc/ssh/.ssh`. It removes every key you didn't keep, with a backup in `/root/.ccdc-keys/<time>/` on each box. Team keys and `cert-authority` lines are kept by default, so scoring keeps working. It refuses if root would be left with nothing. `-y` keeps the defaults with no questions. `-r` also makes root keys-only.
 - **`lockdown_ssh.sh`** moves `/etc/ssh/.ssh` to `/root/quarantine/`, strips `kali@kali` / `deploy@management` from root's keys, forces `AuthorizedKeysFile .ssh/authorized_keys`, blocks cert logins as root, and restores the old sshd_config if `sshd -t` fails.
 - **`revoke_certs.sh [ID ...]`** builds `/etc/ssh/revoked_keys` from the CA that signed `forged-root-cert` and adds `RevokedKeys`. Scoring certs have other IDs and keep working. Found another forged ID? Re-run with it added: `"scripts/revoke_certs.sh forged-root-cert <new-id>"`. Boxes that don't trust that CA print "nothing to do".
 - **`cleanup_persist.sh`** removes the health-check timer/service, `cron.d/syshealth` + `sysintegrity`, the svc_health re-creation lines, the red keys in any `authorized_keys`, and locks `svc_health`. Everything removed is copied to `/root/quarantine/persist.<time>`. Leaves the scoring `cert-authority` lines alone and prints how many root has.
-- All three are safe to re-run.
+- **`harden.sh`** backs up `/etc` to `/root/.ccdc-harden/<time>/`. It then hardens sshd (validated, rolled back if `sshd -t` fails), locks empty passwords, applies kernel settings and file permissions, timestamps shell history, and adds auditd watches. It prints a `REVIEW:` list of things a human should decide: extra UID 0 accounts, NOPASSWD, PAM hooks, aliases, immutable files, attack tools.
+  - **With no `--rotate`, root gets a new password.** Pass `--rotate ''` when 04 handles passwords.
+  - **New passwords print as `PW|host|user|password` lines.** Keep the `ANSIBLE_LOG_PATH=/dev/null` prefix so they don't land in `logs/ansible.log`.
+  - **Scored users are not read from `group_vars`.** List them yourself with `--exclude`.
+  - **Riskier options are off by default:** `--no-password-login`, `--root-keys-only`, `--no-forwarding`, `--strip-nopasswd`, `--allowlist-keys`. `--check` previews everything.
+- All of these are safe to re-run.
 
 ## Watching (every 10-15 minutes)
 
 ```bash
-ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"
+ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
 ```
 
-One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION`, `DEVNODE-RUNNING`, or a file path). Read it like this:
-- **`certauth=`** must stay at the scoring CA count (it dropped to 0 when 03 ran with `wipe_other_keys`). If it falls, scoring SSH breaks.
+One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`UNKNOWN-KEYS=<n>(files)`, `RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION`, `DEVNODE-RUNNING`, or a file path). Read it like this:
+- **`certauth=`** must stay at the scoring CA count. If it falls, scoring SSH breaks.
+- **`UNKNOWN-KEYS=`** counts keys that are neither a team key nor a `cert-authority` line, in every key file sshd reads. It catches keys like `root@localhost` that a list of known-bad names misses. Fix it with `./keys_pick.sh -l <host>`. Running verify_clean without key arguments falls back to the known INV3 red keys only (`RED-KEYS`).
 - **`RED-SESSION`**: someone is connected from a red team IP right now. `ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"`, then kill the PID, or on ss boxes `ss -K dst <ip>`.
 - **Anything else:** re-run the clean-up pass on that host (`-l <host>`).
 
@@ -133,7 +166,7 @@ ansible skerja -m script -a "scripts/reissue_cert.sh /etc/step/skerja-https.env"
 - **Alpine `NO_PYTHON`:** 00 installs it with `apk`, which needs the Alpine mirror. With no internet, use the bash kit on that box.
 - **Scored users:** 04 never touches anything in `scored_users`. Change those through **Quotient** only.
 - **Rotating the login account's own password:** run 04 with `-e rotate_login_user=true`, only after 03 said KEY LOGIN OK. If the debian group logs in as a sudo user, that's also the new sudo password for `-K`.
-- **`03_keys.yml -e wipe_other_keys=true` also wipes the scoring `cert-authority` line** from root's keys, which breaks scored SSH. Put it back from the backup copy 03 leaves behind: `ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`. Then check that verify_clean shows `certauth=1` or more.
+- **`-e wipe_other_keys` is gone from 03:** it deleted the scoring `cert-authority` line. Use `keys_pick.sh` to remove other keys. If an old run already wiped it, put it back from the backup copy 03 left: `ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`.
 - **Locked accounts** (Ubuntu's root, `!`/`*` in shadow) are skipped on purpose. Setting a password would unlock them.
 - **Backups bigger than 400 MB** stay on the box at `/root/.bk-*.tgz`. Trim `backup_paths`, or raise the limit with `-e backup_max_mb=800`.
 - **Wazuh needs internet** to reach packages.wazuh.com. Manager on Debian/RHEL only, never Alpine. Agents are pinned to the manager's exact version.
