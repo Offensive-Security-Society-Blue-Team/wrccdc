@@ -14,7 +14,7 @@ Internal 192.168.220.x, external 10.100.112.x.
 |---|---|---|
 | `Linux_Scripts/` | bash scripts, copied onto one box and run by hand (sections 1 and 1b) | the box |
 | `Linux_Scripts/Wazzuh/` | manual / offline Wazuh install and rule notes (section 13b) | the Wazuh box |
-| `ansible/linux/` | playbooks 00-06 for every Linux box at once (section 2) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/` | playbooks 00-06 + `scripts/` (verify_clean, lockdown, certs...) for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
 | `ansible/windows/` | Windows playbooks (Windows teammates) | - |
 
 ---
@@ -67,27 +67,66 @@ sudo bash root_pass.sh        # root only                -> /home/<host>-new_roo
 
 ## 2. Ansible (run from `ansible/linux/`)
 
+Every box logs in as root (`hosts.ini`), so no `-K`/`-b` is needed. Add `-K` only if a group logs in as a sudo user.
+
 ```bash
 cd ansible/linux                                    # ansible.cfg only loads from here
-ansible-playbook 00_bootstrap.yml -k -K             # Python on Alpine + RAM/CPU per box
-ansible-playbook 01_audit.yml -K                    # user + cron audit -> out/<time>/; re-run every 30-45 min
-ansible-playbook 02_backup.yml -K                   # -> loot/backups/<host>-<time>.tgz (section 16)
-ansible-playbook 03_keys.yml -k -K                  # team key on login account; after this no more -k
-ansible-playbook 04_passwords.yml -K --check        # preview, then run without --check -> loot/passwords/*.csv
-ansible-playbook 04_passwords.yml -K -e rotate_login_user=true   # also root on rhel/alpine (login account)
-ansible-playbook 05_sshd.yml -K -l haf              # one box, check scoring, then drop -l
-ansible-playbook 06_wazuh.yml -K                    # manager + agents
+ansible-playbook 00_bootstrap.yml -k                # Python on Alpine + RAM/CPU per box
+ansible-playbook 01_audit.yml                       # first-pass user + cron audit -> out/<time>/ (once at the start)
+ansible-playbook 02_backup.yml -l 'linux:!gufu'     # -> loot/backups/<host>-<time>.tgz (section 16); gufu is too big
+ansible-playbook 03_keys.yml -k                     # team key on login account; after this no more -k
+ansible-playbook 04_passwords.yml --check           # preview, then run without --check -> loot/passwords/*.csv
+ansible-playbook 04_passwords.yml -e rotate_login_user=true      # also root (the login account)
+ansible-playbook 05_sshd.yml -l haf                 # one box, check scoring, then drop -l
+ansible-playbook 06_wazuh.yml                       # manager + agents
 grep -h '^\[!\]' out/<time>/*.txt                   # flagged lines from 01
 ```
 Add `-l <host>` to test on one box, `--check --diff` to preview.
 
+`03_keys.yml -e wipe_other_keys=true` also deletes the scoring `cert-authority` line. Put it back:
+`ansible <hosts> -m shell -a "grep -h '^cert-authority' /root/.ssh/authorized_keys.*~ | head -1 >> /root/.ssh/authorized_keys"`
+
+## 2b. INV3 scripts (`ansible/linux/scripts/`, details in `ansible/linux/README.md`)
+
+```bash
+# --- the main check, every 10-15 min: one line per box, CLEAN or what came back
+ansible linux -m script -a "scripts/verify_clean.sh" | grep -E "certauth=|UNREACHABLE|FAILED"
+
+# --- clean-up pass (safe to re-run; try -l haf,djupi first)
+for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert" cleanup_persist.sh; do
+  ansible linux -m script -a "scripts/$s"
+done | grep -E "=====|FIXED|REMOVED|LOCKED|CLEANED|FAILED|revoked IDs|cert-authority"
+ansible linux -m script -a "scripts/revoke_certs.sh forged-root-cert <new-id>"    # another forged cert ID found
+
+# --- read-only digging
+ansible linux -m script -a "scripts/hunt.sh" | tee out/hunt_$(date +%H%M).txt | grep -E "=====|\[!\]"
+ansible linux -m script -a "scripts/implant_triage.sh dbus_session"   # fileless (memfd) + planted binary
+ansible linux -m script -a "scripts/account_use.sh svc_health"        # logins, sudo, processes, history
+
+# --- PHP2Shell (CVE-2026-109618/109619)
+ansible linux   -m script -a "scripts/php_find.sh"                    # versions, patched?, PHP changed today
+ansible <hosts> -m script -a "scripts/php2shell_mitigate.sh"          # stopgap ini + restart PHP/web
+
+# --- expired step-ca certs (renew can't do expired ones)
+ansible linux -m script -a "scripts/reissue_hostcert.sh" | grep -E "=====|OK|FAILED|skipped|reloaded"
+ansible haf   -m script -a "scripts/reissue_cert.sh /etc/step/renew/haf.env"
+ansible djupi -m script -a "scripts/reissue_cert.sh /etc/step/renew/pos.env"
+ansible skerja -m script -a "scripts/reissue_cert.sh /etc/step/skerja-https.env"; ansible skerja -m raw -a 'rc-service apache2 reload'
+
+# --- red team session still connected (verify_clean says RED-SESSION)
+ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"    # netstat -tnp on Alpine
+ansible <host> -m raw -a "ss -K dst 10.194.194.85; ss -K dst 10.197.207.23"                  # or kill <PID>
+```
+
+## 2c. Ad-hoc
+
 ```bash
 ansible linux -m ping                                   # who answers
-ansible linux -K -b -m shell -a 'ss -tulpn'             # any command on every box
-ansible gufu -K -b -m shell -a 'tail -20 /var/log/secure'
-ansible linux -K -b -m script -a scripts/hunt.sh        # run a local script on every box
-ansible 'linux:!alpine' -K -b -m shell -a 'who'         # everyone except Alpine
-ansible linux -K -b -m shell -a 'systemctl is-active nginx apache2 httpd gitea 2>/dev/null'
+ansible linux -m shell -a 'ss -tulpn'                   # any command on every box
+ansible gufu -m shell -a 'tail -20 /var/log/secure'
+ansible linux -m raw -a '...'                           # no Python needed (Alpine, broken boxes)
+ansible 'linux:!alpine' -m shell -a 'who'               # everyone except Alpine
+ansible linux -m shell -a 'systemctl is-active nginx apache2 httpd gitea 2>/dev/null'
 ```
 
 ## 3. Services: which tool on which distro
@@ -276,11 +315,11 @@ V=20261121-094512             # which backup version (the time in the filename)
 
 mkdir -p /tmp/r /tmp/now
 tar xzf loot/backups/$H-$V.tgz -C /tmp/r "$F"
-ansible $H -K -b -m fetch -a "src=/$F dest=/tmp/now/ flat=yes"
+ansible $H -m fetch -a "src=/$F dest=/tmp/now/ flat=yes"
 diff /tmp/now/$(basename "$F") "/tmp/r/$F"
-ansible $H -K -b -m copy -a "src=/tmp/r/$F dest=/$F backup=yes"
-ansible $H -K -b -m shell -a "<test> && <reload>"     # e.g. "nginx -t && systemctl reload nginx"
-ansible $H -K -b -m shell -a "systemctl is-active <service>"
+ansible $H -m copy -a "src=/tmp/r/$F dest=/$F backup=yes"
+ansible $H -m shell -a "<test> && <reload>"     # e.g. "nginx -t && systemctl reload nginx"
+ansible $H -m shell -a "systemctl is-active <service>"
 # then: check Quotient, and note time / host / file / diff output for the incident report
 ```
 
@@ -296,7 +335,7 @@ cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bad && cp /tmp/r/etc/nginx/nginx.
 ## 17. After a restore: test, then reload/restart the service
 
 The test part catches a broken config before the restart, so a bad file can't take the service down.
-From `ansible/linux/`: `ansible $H -K -b -m shell -a "<command>"`. On the box itself, just run the command.
+From `ansible/linux/`: `ansible $H -m shell -a "<command>"`. On the box itself, just run the command.
 
 | You restored | Systemd boxes (Ubuntu, Mint, Lubuntu, Rocky, Fedora) | Alpine (OpenRC) |
 |---|---|---|
@@ -315,8 +354,8 @@ From `ansible/linux/`: `ansible $H -K -b -m shell -a "<command>"`. On the box it
 **Service name doesn't match?** Check what's actually running on that box:
 
 ```bash
-ansible $H -K -b -m shell -a "systemctl list-units --type=service --state=running"   # most boxes
-ansible $H -K -b -m shell -a "rc-status"                                              # Alpine
+ansible $H -m shell -a "systemctl list-units --type=service --state=running"   # most boxes
+ansible $H -m shell -a "rc-status"                                              # Alpine
 ```
 
 **reload vs restart:** `reload` re-reads the config without dropping connections (use it when the
