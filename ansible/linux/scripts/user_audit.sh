@@ -3,6 +3,7 @@
 #
 # Usage:   ansible-playbook 01_audit.yml    (every box, from ansible/linux)
 #          sudo sh user_audit.sh | tee "user_audit_$(hostname)_$(date +%H%M).txt"
+#          sudo sh user_audit.sh --since 09:00  # PAM files changed after 09:00
 #          sh user_audit.sh -h                 (prints these examples)
 # Output:  lines starting with [!] deserve a closer look. A flag is a lead,
 #          not proof of compromise - confirm before you lock/remove anything.
@@ -15,7 +16,8 @@ export PATH
 usage() {
     [ -n "${1:-}" ] && echo "error: $1" >&2
     cat >&2 <<'USAGE'
-usage: user_audit.sh        (no arguments; READ-ONLY; run as root for full results)
+usage: user_audit.sh        ([--since TIME]; READ-ONLY; run as root for full results)
+  sudo sh user_audit.sh --since 09:00       # PAM files changed after 09:00 instead of the last 2 days
   sudo sh user_audit.sh | tee "user_audit_$(hostname)_$(date +%H%M).txt"
   ansible-playbook 01_audit.yml                # every box, from ansible/linux
 USAGE
@@ -23,7 +25,21 @@ USAGE
     exit 0
 }
 case "${1:-}" in -h|--help) usage ;; esac
-[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+case "${1:-}" in
+    --since) [ -n "${2:-}" ] || usage "--since needs a time, like --since 09:00"; SINCE=$2; shift 2 ;;
+    --since=*) SINCE=${1#*=}; shift ;;
+esac
+[ $# -eq 0 ] || usage "unknown argument: $* (only --since TIME)"
+case "${RECENT_DAYS:-2}" in *[!0-9]*|"") usage "RECENT_DAYS must be a whole number of days (got: $RECENT_DAYS)" ;; esac
+RECENT_DAYS=${RECENT_DAYS:-2}
+# "recent" = modified in the last RECENT_DAYS days, or after --since TIME (09:00, '2026-11-21 09:00' or @<epoch>)
+AGE="-mtime -$RECENT_DAYS"; WINDOW="last $RECENT_DAYS day(s)"
+if [ -n "${SINCE:-}" ]; then
+    since_s=$(date -d "$SINCE" +%s 2>/dev/null) || usage "can't read the time '$SINCE' (use 09:00, '2026-11-21 09:00' or @<epoch>)"
+    since_m=$(( ($(date +%s) - since_s) / 60 + 1 ))
+    [ "$since_m" -gt 0 ] || usage "--since $SINCE is in the future by this box's clock ($(date))"
+    AGE="-mmin -$since_m"; WINDOW="since $(date -d "@$since_s" '+%Y-%m-%d %H:%M')"
+fi
 
 flag()    { echo "[!] $*"; }
 section() { printf '\n===== %s =====\n' "$1"; }
@@ -180,8 +196,8 @@ if [ -d /etc/pam.d ]; then
     grep -nE '^[^#]*(pam_exec|pam_script)' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "runs a program: $l"; done
     grep -nE '^[^#]*auth[[:space:]]+sufficient[[:space:]]+pam_permit' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "lets any password in: $l"; done
     grep -nE '^[^#]*[[:space:]](/[^[:space:]]+\.so)' /etc/pam.d/* 2>/dev/null | while IFS= read -r l; do flag "module loaded by full path: $l"; done
-    find /etc/pam.d -type f -mtime "-${RECENT_DAYS:-2}" 2>/dev/null | while read -r f; do
-        echo "changed in the last ${RECENT_DAYS:-2} day(s): $f   ($(mtime "$f"))"
+    find /etc/pam.d -type f $AGE 2>/dev/null | while read -r f; do
+        echo "changed ($WINDOW): $f   ($(mtime "$f"))"
     done
     # modules no package installed (ask with and without /usr: merged-/usr boxes register one spelling)
     mods=$(for d in $PAMDIRS; do find "$d" -maxdepth 1 -name '*.so' -type f 2>/dev/null; done | sed 's|^/usr/|/|' | sort -u)

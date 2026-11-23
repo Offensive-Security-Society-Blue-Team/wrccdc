@@ -43,7 +43,7 @@ Run scripts through `run.sh`. It works like `ansible <hosts> -m script -a ...`, 
 
 ```bash
 ./run.sh linux verify_clean.sh                    # team keys are filled in for you
-./run.sh linux hunt.sh -g '=====|\[!\]'           # screen: only the flags; file: everything
+./run.sh -g '=====|\[!\]' linux hunt.sh           # screen: only the flags; file: everything
 ./run.sh haf,djupi lockdown_ssh.sh
 ./run.sh linux harden.sh --rotate '' --check
 ```
@@ -150,9 +150,14 @@ Deeper look, when verify_clean is clean but something still feels off:
 
 ```bash
 ansible linux -m script -a "scripts/hunt.sh" | tee out/hunt_$(date +%H%M).txt | grep -E "=====|\[!\]"
+START=$(date -d 09:00 +%s)       # when the boxes were still clean, as seen from your laptop
+./run.sh -g '=====|\[!\]' linux hunt.sh --since @$START          # only files changed after 09:00
+./run.sh -g '=====|\[!\]' linux cron_audit.sh --since @$START
 ansible linux -m script -a "scripts/implant_triage.sh dbus_session"     # fileless / planted binary
 ansible linux -m script -a "scripts/account_use.sh svc_health"          # is this account being used?
 ```
+
+**`--since`** (hunt, cron_audit, user_audit): the boxes start clean at 09:00, so a file changed after that is either us or the red team. Without it, "recent" means the last 2 days (`RECENT_DAYS`), which also flags the setup the organizers did before the event. Pass `@$START` (seconds, worked out on your laptop) rather than `09:00`: some boxes keep their clock in another time zone, and `09:00` would mean their 09:00. Keep a note of what the team changes, so the rest stands out.
 
 `01_audit.yml` is still useful for a first pass at 9:00. After that, verify_clean and hunt replace re-running it.
 Re-run **02** after big fixes: `ansible-playbook 02_backup.yml -l 'linux:!gufu' | grep -E "saved|TOO BIG|failed="` (gufu's backup is too big; back it up by hand).

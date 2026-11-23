@@ -5,7 +5,7 @@
 #
 # Usage (from ansible/linux):
 #   ./run.sh linux verify_clean.sh                    # team keys from files/team_key.pub + ~/.ssh/inv3.pub are added for you
-#   ./run.sh linux hunt.sh -g '=====|\[!\]'           # screen: only flags; file: everything
+#   ./run.sh -g '=====|\[!\]' linux hunt.sh           # screen: only flags; file: everything
 #   ./run.sh haf,djupi lockdown_ssh.sh
 #   ./run.sh linux revoke_certs.sh forged-root-cert <new-id>
 #   ./run.sh linux harden.sh --rotate '' --check      # PW| lines go to loot/passwords/, never into out/ or logs/
@@ -20,7 +20,7 @@ usage() {
     cat >&2 <<'USAGE'
 usage: ./run.sh [-g REGEX] [-o FILE] <hosts> <script.sh> [script args...]     (from ansible/linux)
   ./run.sh linux verify_clean.sh
-  ./run.sh linux hunt.sh -g '=====|\[!\]'
+  ./run.sh -g '=====|\[!\]' linux hunt.sh
   ./run.sh haf,djupi lockdown_ssh.sh
   ./run.sh linux harden.sh --rotate '' --check
   <hosts> = a host, a group, or a list: haf | linux | haf,djupi | 'linux:!gufu'
