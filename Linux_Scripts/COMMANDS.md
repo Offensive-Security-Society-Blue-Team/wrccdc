@@ -95,7 +95,7 @@ Every script prints its own examples with `-h`, and also when it's run with wron
 
 **To keep or send the output, use `./run.sh <hosts> <script.sh> [args]` instead of `ansible ... -m script -a`.**
 It saves `out/<script>_<hosts>_<time>.txt` (one block per box, with errors). Passwords go to `loot/passwords/` instead.
-`./run.sh linux verify_clean.sh` · `./run.sh linux hunt.sh -g '=====|\[!\]'` · `./run.sh -h`
+`./run.sh linux verify_clean.sh` · `./run.sh -g '=====|\[!\]' linux hunt.sh` · `./run.sh -h`
 
 ```bash
 # --- the main check, every 10-15 min: one line per box, CLEAN or what came back

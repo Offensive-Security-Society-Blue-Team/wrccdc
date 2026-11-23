@@ -5,6 +5,7 @@
 # Usage:   ansible-playbook 01_audit.yml    (every box, from ansible/linux)
 #          sudo sh cron_audit.sh | tee "cron_audit_$(hostname)_$(date +%H%M).txt"
 #          sudo RECENT_DAYS=1 sh cron_audit.sh     # change the "recently modified" window
+#          sudo sh cron_audit.sh --since 09:00   # only files changed after 09:00 (the boxes start clean)
 #          sh cron_audit.sh -h                 (prints these examples)
 # Output:  lines starting with [!] deserve a closer look. A flag is a lead,
 #          not proof - some legit jobs use curl/wget, for example.
@@ -17,19 +18,32 @@ export PATH
 usage() {
     [ -n "${1:-}" ] && echo "error: $1" >&2
     cat >&2 <<'USAGE'
-usage: cron_audit.sh        (no arguments; READ-ONLY; run as root for full results)
+usage: cron_audit.sh        ([--since TIME]; READ-ONLY; run as root for full results)
   sudo sh cron_audit.sh | tee "cron_audit_$(hostname)_$(date +%H%M).txt"
   sudo RECENT_DAYS=1 sh cron_audit.sh       # tighter "recently modified" window (days, default 2)
+  sudo sh cron_audit.sh --since 09:00       # only flag files changed after 09:00 (the box was clean then)
+  ansible linux -m script -a "scripts/cron_audit.sh --since @$(date -d 09:00 +%s)"
   ansible-playbook 01_audit.yml                # every box, from ansible/linux
 USAGE
     [ -n "${1:-}" ] && exit 1
     exit 0
 }
 case "${1:-}" in -h|--help) usage ;; esac
-[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+case "${1:-}" in
+    --since) [ -n "${2:-}" ] || usage "--since needs a time, like --since 09:00"; SINCE=$2; shift 2 ;;
+    --since=*) SINCE=${1#*=}; shift ;;
+esac
+[ $# -eq 0 ] || usage "unknown argument: $* (only --since TIME)"
 case "${RECENT_DAYS:-2}" in *[!0-9]*|"") usage "RECENT_DAYS must be a whole number of days (got: $RECENT_DAYS)" ;; esac
-
 RECENT_DAYS=${RECENT_DAYS:-2}
+# "recent" = modified in the last RECENT_DAYS days, or after --since TIME (09:00, '2026-11-21 09:00' or @<epoch>)
+AGE="-mtime -$RECENT_DAYS"; WINDOW="last $RECENT_DAYS day(s)"
+if [ -n "${SINCE:-}" ]; then
+    since_s=$(date -d "$SINCE" +%s 2>/dev/null) || usage "can't read the time '$SINCE' (use 09:00, '2026-11-21 09:00' or @<epoch>)"
+    since_m=$(( ($(date +%s) - since_s) / 60 + 1 ))
+    [ "$since_m" -gt 0 ] || usage "--since $SINCE is in the future by this box's clock ($(date))"
+    AGE="-mmin -$since_m"; WINDOW="since $(date -d "@$since_s" '+%Y-%m-%d %H:%M')"
+fi
 
 flag()    { echo "[!] $*"; }
 section() { printf '\n===== %s =====\n' "$1"; }
@@ -45,7 +59,7 @@ STRONG='(^|[^a-z])(nc|ncat|netcat|socat|telnet)[[:space:]]|/dev/(tcp|udp)/|(bash
 HOOKS='PROMPT_COMMAND|LD_PRELOAD|trap[[:space:]]|alias[[:space:]]+(sudo|su|ls|ps|ss|netstat|cat|passwd|ssh)='
 
 [ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' crontabs will be unreadable (run: sudo sh cron_audit.sh)"
-echo "host: $(hostname)   date: $(date)   'recent' = modified in last $RECENT_DAYS day(s)"
+echo "host: $(hostname)   date: $(date)   'recent' = modified $WINDOW"
 
 # Print the active (non-comment) lines of a crontab-style file, flagging
 # suspicious ones. Also flags files not owned by root.
@@ -73,11 +87,11 @@ scan_files() {
     done
 }
 
-# Flag files under the given paths modified in the last RECENT_DAYS days.
+# Flag files under the given paths modified recently ($AGE: last RECENT_DAYS days, or since --since).
 recent() {
     for d in "$@"; do
         [ -e "$d" ] || continue
-        find "$d" -type f -mtime "-$RECENT_DAYS" 2>/dev/null | while read -r f; do
+        find "$d" -type f $AGE 2>/dev/null | while read -r f; do
             flag "recently modified: $f   ($(mtime "$f"))"
         done
     done

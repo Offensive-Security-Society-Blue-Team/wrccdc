@@ -5,6 +5,7 @@
 #
 # Usage:   sudo sh hunt.sh | tee "hunt_$(hostname)_$(date +%H%M).txt"
 #          sudo RECENT_DAYS=1 sh hunt.sh
+#          sudo sh hunt.sh --since 09:00             (only files changed after 09:00; the boxes start clean)
 #          ansible linux -m script -a scripts/hunt.sh            (all boxes)
 #          sh hunt.sh -h                                    (prints these examples)
 # Output:  [!] lines are leads, not proof. Changes NOTHING.
@@ -16,18 +17,32 @@ export PATH
 usage() {
     [ -n "${1:-}" ] && echo "error: $1" >&2
     cat >&2 <<'USAGE'
-usage: hunt.sh        (no arguments; READ-ONLY; run as root for full results)
+usage: hunt.sh        ([--since TIME]; READ-ONLY; run as root for full results)
   sudo sh hunt.sh | tee "hunt_$(hostname)_$(date +%H%M).txt"
   sudo RECENT_DAYS=1 sh hunt.sh       # tighter "recently modified" window (days, default 2)
+  sudo sh hunt.sh --since 09:00       # only flag files changed after 09:00 (the box was clean then)
+  ansible linux -m script -a "scripts/hunt.sh --since @$(date -d 09:00 +%s)"   # same time on every box, whatever its time zone
   ansible linux -m script -a scripts/hunt.sh | grep -E "=====|\[!\]"      # every box, from ansible/linux
 USAGE
     [ -n "${1:-}" ] && exit 1
     exit 0
 }
 case "${1:-}" in -h|--help) usage ;; esac
-[ $# -eq 0 ] || usage "this script takes no arguments (got: $*)"
+case "${1:-}" in
+    --since) [ -n "${2:-}" ] || usage "--since needs a time, like --since 09:00"; SINCE=$2; shift 2 ;;
+    --since=*) SINCE=${1#*=}; shift ;;
+esac
+[ $# -eq 0 ] || usage "unknown argument: $* (only --since TIME)"
 case "${RECENT_DAYS:-2}" in *[!0-9]*|"") usage "RECENT_DAYS must be a whole number of days (got: $RECENT_DAYS)" ;; esac
 RECENT_DAYS=${RECENT_DAYS:-2}
+# "recent" = modified in the last RECENT_DAYS days, or after --since TIME (09:00, '2026-11-21 09:00' or @<epoch>)
+AGE="-mtime -$RECENT_DAYS"; WINDOW="last $RECENT_DAYS day(s)"
+if [ -n "${SINCE:-}" ]; then
+    since_s=$(date -d "$SINCE" +%s 2>/dev/null) || usage "can't read the time '$SINCE' (use 09:00, '2026-11-21 09:00' or @<epoch>)"
+    since_m=$(( ($(date +%s) - since_s) / 60 + 1 ))
+    [ "$since_m" -gt 0 ] || usage "--since $SINCE is in the future by this box's clock ($(date))"
+    AGE="-mmin -$since_m"; WINDOW="since $(date -d "@$since_s" '+%Y-%m-%d %H:%M')"
+fi
 
 flag()    { echo "[!] $*"; }
 section() { printf '\n===== %s =====\n' "$1"; }
@@ -35,7 +50,7 @@ have()    { command -v "$1" >/dev/null 2>&1; }
 cmdline() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | cut -c1-140; }
 
 [ "$(id -u)" -eq 0 ] || echo "[warn] not root: other users' processes and sockets will be hidden (run: sudo sh hunt.sh)"
-echo "host: $(hostname)   date: $(date)   'recent' = last $RECENT_DAYS day(s)"
+echo "host: $(hostname)   date: $(date)   'recent' = $WINDOW"
 
 # Programs that should rarely own a network socket. A reverse shell is
 # usually one of these holding a connection out to the attacker.
@@ -125,15 +140,36 @@ find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | while read -
         flag "SUID/SGID on a program that gives a shell: $f"
     fi
 done
-find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -mtime "-$RECENT_DAYS" 2>/dev/null | while read -r f; do
+find / -xdev -type f \( -perm -4000 -o -perm -2000 \) $AGE 2>/dev/null | while read -r f; do
     flag "SUID/SGID file changed recently: $f   ($(ls -l "$f" | awk '{print $6, $7, $8}'))"
 done
 echo "(no [!] lines above = nothing odd)"
 
 section "System programs modified recently (trojaned binaries)"
-find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type f -mtime "-$RECENT_DAYS" 2>/dev/null \
+find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type f $AGE 2>/dev/null \
   | head -n 40 | while read -r f; do flag "$f   ($(ls -l "$f" | awk '{print $6, $7, $8}'))"; done
 echo "(a package update also triggers this - check against apt/dnf/apk history)"
+
+section "Package programs and libraries that no longer match their package (trojaned sshd, sudo, PAM, libc)"
+pkg_changed() {   # prints "<path> <why>"; dpkg/rpm column 1 has 5 in 3rd place = checksum differs, column 2 c/d/g/l/r = config/doc file
+    if have dpkg; then
+        nice dpkg --verify 2>/dev/null | awk '$1 ~ /^..5/ && $2 !~ /^[cdglr]$/ {print $NF, "checksum differs from the .deb"}'
+    elif have rpm; then
+        nice rpm -Va 2>/dev/null | awk '$1 ~ /^..5/ && $2 !~ /^[cdglr]$/ {print $NF, "checksum differs from the rpm"}'
+    elif have apk; then
+        apk audit --system 2>/dev/null | awk '$1 == "U" || $1 == "A" {p = $2; sub(/^\//, "", p)
+            print "/" p, ($1 == "U" ? "changed since apk installed it" : "in a system folder but not from any package")}'
+    fi
+}
+if have dpkg || have rpm || have apk; then
+    echo "(re-checks every installed file against the package: up to a couple of minutes)"
+    pkg_changed | grep -E '^/(usr/)?(s?bin|lib[^/ ]*)/' | grep -vE '\.pyc |/__pycache__/|^/(usr/)?lib/(modules|firmware)/' \
+        | head -n 40 | while read -r f why; do flag "$f   ($why)"; done
+    echo "(no [!] lines above = every program and library matches its package)"
+    echo "(boxes start clean, so a changed sshd, sudo, su, login, ps/ss/ls or pam_*.so is the red team: reinstall that package)"
+else
+    echo "(no dpkg, rpm or apk on this box)"
+fi
 
 # ---------------------------------------------------------------------------
 section "Web shells in web roots"
@@ -141,7 +177,7 @@ for d in /var/www /srv/www /srv/http /usr/share/nginx/html /var/lib/gitea/custom
     [ -d "$d" ] || continue
     echo "--- $d"
     find "$d" -type f \( -name '*.php' -o -name '*.phtml' -o -name '*.php[0-9]' -o -name '*.jsp' -o -name '*.cgi' -o -name '*.sh' -o -name '*.py' \) \
-        -mtime "-$RECENT_DAYS" 2>/dev/null | while read -r f; do flag "recently changed script: $f"; done
+        $AGE 2>/dev/null | while read -r f; do flag "recently changed script: $f"; done
     # code that runs whatever the web request sends = a web shell
     find "$d" -type f \( -name '*.php' -o -name '*.phtml' -o -name '*.php[0-9]' \) -exec \
         grep -lE '(eval|assert)[[:space:]]*\([[:space:]]*(base64_decode|gzinflate|str_rot13|\$_(GET|POST|REQUEST|COOKIE))|(system|shell_exec|passthru|exec|popen|proc_open)[[:space:]]*\([[:space:]]*\$_(GET|POST|REQUEST|COOKIE)' {} \; 2>/dev/null \

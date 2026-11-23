@@ -20,7 +20,7 @@ ansible/linux/
 ├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
     ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
-    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, web shells, ptrace, backdoor ports
+    ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, changed package files, web shells, ptrace, backdoor ports
     ├── account_use.sh <user>  # READ-ONLY  is this account in use (logins, sudo, processes, history)
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today
@@ -43,7 +43,7 @@ Run scripts through `run.sh`. It works like `ansible <hosts> -m script -a ...`, 
 
 ```bash
 ./run.sh linux verify_clean.sh                    # team keys are filled in for you
-./run.sh linux hunt.sh -g '=====|\[!\]'           # screen: only the flags; file: everything
+./run.sh -g '=====|\[!\]' linux hunt.sh           # screen: only the flags; file: everything
 ./run.sh haf,djupi lockdown_ssh.sh
 ./run.sh linux harden.sh --rotate '' --check
 ```
@@ -80,12 +80,31 @@ ansible-inventory --graph      # should show debian / rhel / alpine under linux
 | 01 | `ansible-playbook 01_audit.yml` | flag counts per box. Then `grep -h '^\[!\]' out/<time>/*.txt` |
 | 02 | `ansible-playbook 02_backup.yml` | `saved loot/backups/<host>-<time>.tgz` per box |
 | 03 | `ansible-playbook 03_keys.yml -k` | `KEY LOGIN OK` per box. From here on `-k` is no longer needed. |
+| 03b | **Right after 03:** [close every door](#close-every-door-right-after-03) | `FIXED` / `ok` lines and `revoked IDs:`. Then 04 changes the passwords |
 | 04 | `ansible-playbook 04_passwords.yml --check`, then without `--check` | the CHANGING / skipped lists, then `loot/passwords/<host>-<time>.csv` |
 | 05 | `ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"`, then without `--check`, check scoring, then `linux` | `DONE:` / `WOULD:` lines, `sshd now:` settings, and a `REVIEW:` list for a human to decide |
 | 06 | `ansible-playbook 06_wazuh.yml` | manager version, then an agent list with every box `Active` |
 
 **`-k` and `-K`:** `-k` asks for the SSH password, which you only need until 03 has run. `-K` asks for the sudo password, only needed if `[debian:vars]` logs in as a sudo user instead of root.
 **Test on one box first:** add `-l <host>` to any command. Preview playbook changes with `--check --diff`.
+
+## Close every door (right after 03)
+
+At INV3 the red team had three ways in over SSH: the root password, their keys, and a forged SSH certificate signed by the step-ca CA that every box trusts.
+We removed keys first. Removing keys does nothing against a certificate, so it kept working (38 root logins) until `lockdown_ssh.sh` ran at 10:53.
+Close all the doors on all boxes in the same few minutes, then do 04 (passwords):
+
+```bash
+RED="10.194.194.85 10.197.207.23"     # red team IPs from the logs. Check first that none of them is the scoring engine
+ansible linux -m raw -a "for ip in $RED; do ip route add blackhole \$ip/32 2>/dev/null; ss -K dst \$ip >/dev/null 2>&1; done; ip route | grep blackhole"
+./keys_pick.sh -l linux -y
+for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert"; do ansible linux -m script -a "scripts/$s"; done | grep -E "=====|FIXED|FAILED|revoked IDs"
+```
+
+- **The blackhole route** drops all traffic to and from those IPs on every port, and cuts sessions they already have open. It works the same on every distro (busybox too) and doesn't touch the firewall config. Undo one with `ip route del blackhole <ip>/32`. It's gone after a reboot.
+- **`lockdown_ssh.sh`** stops root logging in with *any* certificate from a `TrustedUserCAKeys` CA, so a new forged cert with another name doesn't work either. Normal users' step-ca certs and the scoring `cert-authority` line in root's keys keep working.
+- **`revoke_certs.sh`** also revokes the known forged cert by name, for every account.
+- After this, `verify_clean` flags `ROOT-CERT-CA` if root can take CA certs again.
 
 ## Clean-up pass (after 03, once you know the red team's tricks)
 
@@ -118,10 +137,11 @@ ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/tea
 ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/team_key.pub ~/.ssh/inv3.pub | sort -u | tr '\n' ' ')" | grep -E "certauth=|UNREACHABLE|FAILED"
 ```
 
-One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`UNKNOWN-KEYS=<n>(files)`, `RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION`, `DEVNODE-RUNNING`, `DBUS_SESSION-RUNNING`, `MEMFD-PROC=<pid>`, `SVC_HEALTH`, or a file path). Read it like this:
+One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`UNKNOWN-KEYS=<n>(files)`, `RED-KEYS`, `NOPASSWD-SUDO`, `RED-SESSION=<ports>`, `ROOT-CERT-CA`, `DEVNODE-RUNNING`, `DBUS_SESSION-RUNNING`, `MEMFD-PROC=<pid>`, `SVC_HEALTH`, or a file path). Read it like this:
 - **`certauth=`** must stay at the scoring CA count. If it falls, scoring SSH breaks.
 - **`UNKNOWN-KEYS=`** counts keys that are neither a team key nor a `cert-authority` line, in every key file sshd reads. It catches keys like `root@localhost` that a list of known-bad names misses. Fix it with `./keys_pick.sh -l <host>`. Running verify_clean without key arguments falls back to the known INV3 red keys only (`RED-KEYS`).
-- **`RED-SESSION`**: someone is connected from a red team IP right now. `ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"`, then kill the PID, or on ss boxes `ss -K dst <ip>`.
+- **`RED-SESSION=<ports>`**: a red team IP is connected right now, to these ports on the box. `22` = an SSH session (they're in). Another port, like `3306` (MySQL) or `80`, means they're hitting that service, not logged in. `out:<port>` = the box connected out to them (reverse shell or implant). Look with `ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"`, then kill the PID, or on ss boxes `ss -K dst <ip>`. The blackhole route in [close every door](#close-every-door-right-after-03) stops all of these at once.
+- **`ROOT-CERT-CA`**: root can log in with any certificate a `TrustedUserCAKeys` CA signs (the INV3 forged-root-cert door). Re-run `lockdown_ssh.sh` on that host. If it says "already blocked" but the flag stays, another `Match` block comes first: check `sshd -T -C user=root,host=x,addr=1.2.3.4 | grep -i principals`.
 - **`MEMFD-PROC=<pid>`**: a program running from memory with no file on disk (the INV3 kvigindis implant). The clean-up pass does not kill these: look first with `./run.sh <host> implant_triage.sh`, then `kill <pid>` once you know what restarts it.
 - **`SVC_HEALTH`**: the red team account can log in again (real shell and unlocked password). Re-run `cleanup_persist.sh`, then find what re-created it (`cron_audit.sh`).
 - **Anything else:** re-run the clean-up pass on that host (`-l <host>`).
@@ -130,9 +150,14 @@ Deeper look, when verify_clean is clean but something still feels off:
 
 ```bash
 ansible linux -m script -a "scripts/hunt.sh" | tee out/hunt_$(date +%H%M).txt | grep -E "=====|\[!\]"
+START=$(date -d 09:00 +%s)       # when the boxes were still clean, as seen from your laptop
+./run.sh -g '=====|\[!\]' linux hunt.sh --since @$START          # only files changed after 09:00
+./run.sh -g '=====|\[!\]' linux cron_audit.sh --since @$START
 ansible linux -m script -a "scripts/implant_triage.sh dbus_session"     # fileless / planted binary
 ansible linux -m script -a "scripts/account_use.sh svc_health"          # is this account being used?
 ```
+
+**`--since`** (hunt, cron_audit, user_audit): the boxes start clean at 09:00, so a file changed after that is either us or the red team. Without it, "recent" means the last 2 days (`RECENT_DAYS`), which also flags the setup the organizers did before the event. Pass `@$START` (seconds, worked out on your laptop) rather than `09:00`: some boxes keep their clock in another time zone, and `09:00` would mean their 09:00. Keep a note of what the team changes, so the rest stands out.
 
 `01_audit.yml` is still useful for a first pass at 9:00. After that, verify_clean and hunt replace re-running it.
 Re-run **02** after big fixes: `ansible-playbook 02_backup.yml -l 'linux:!gufu' | grep -E "saved|TOO BIG|failed="` (gufu's backup is too big; back it up by hand).
