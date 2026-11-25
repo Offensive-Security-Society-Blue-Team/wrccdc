@@ -69,9 +69,12 @@
       when: (ansible_facts['selinux'].status | default('disabled')) == 'enabled'
       changed_when: false
 
+    # Uses the same jump host / extra SSH options as Ansible itself (ansible_ssh_common_args in the
+    # inventory, or the ANSIBLE_SSH_COMMON_ARGS env var), so the proof works behind a bastion too.
     - name: Prove key login works (from the control node, key only, no password)
       ansible.builtin.command: >-
         ssh -i {{ ansible_ssh_private_key_file }} -p {{ ansible_port | default(22) }}
+        {{ ansible_ssh_common_args | default(lookup('env', 'ANSIBLE_SSH_COMMON_ARGS'), true) }}
         -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=no
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
         {{ key_user }}@{{ ansible_host | default(inventory_hostname) }} true
