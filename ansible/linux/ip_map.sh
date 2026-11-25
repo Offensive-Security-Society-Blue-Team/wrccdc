@@ -15,6 +15,7 @@ cd "$(dirname "$0")" || exit 1
 LIMIT=linux; TOP=0; USERS=""; FROMDIR=""; KEYS=(); LABELS=files/ipmap_labels.txt
 for k in ~/.ssh/inv3.pub files/team_key.pub; do [ -f "$k" ] && KEYS+=("$k"); done
 while [ $# -gt 0 ]; do
+    case "$1" in -l|-u|-K|-L|--from-dir) [ -n "${2:-}" ] || { echo "error: $1 needs a value (try -h)" >&2; exit 1; } ;; esac
     case "$1" in
         -l) LIMIT=$2; shift ;;
         -u) USERS=$2; shift ;;
@@ -130,6 +131,8 @@ def classify(ip, a):
         if o["cid"] != "-":
             if re.search(r"competition|infra|black|vault|scor", o["cid"], re.I): blk += 4; ev.append(f"cert ID '{o['cid']}' as {o['user']}")
             elif o["user"] == "root": red += 3; ev.append(f"root via certificate ID '{o['cid']}'")
+            # a user logging in as themselves with their own cert (ID = username) is normal step-ca use, often the scorer
+            elif o["cid"] == o["user"]: ev.append(f"{o['user']} with their own certificate")
             else: red += 1; ev.append(f"certificate ID '{o['cid']}' as {o['user']}")
         elif o["meth"] == "publickey" and o["fp"] not in TEAMFP and o["user"] == "root":
             red += 2; ev.append(f"root via UNKNOWN key {o['fp'][:22]}")

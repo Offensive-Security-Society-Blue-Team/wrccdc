@@ -16,7 +16,7 @@ h=$(hostname -s 2>/dev/null || hostname)
 has() { command -v "$1" >/dev/null 2>&1; }
 say() { echo "[$h] $*"; }
 [ "$(id -u)" = 0 ] || { say "run as root"; exit 1; }
-umask 077
+umask 077; mkdir -p "$BASE"
 
 snapshot() { # $1 = directory to fill
     d=$1; mkdir -p "$d"
@@ -84,18 +84,23 @@ case "${1:-snap}" in
     verify)
         if has dpkg; then say "dpkg --verify (MD5 of every packaged file; takes a minute)"; dpkg --verify > "$BASE/.raw" 2>/dev/null
         elif has rpm; then say "rpm -Va (checksums of every packaged file; takes a minute)"; rpm -Va --nomtime > "$BASE/.raw" 2>/dev/null
-        elif has apk; then say "apk audit --system"; apk audit --system 2>/dev/null | awk '{print "U /" $2}' > "$BASE/.raw"
+        elif has apk; then say "apk audit --system"; apk audit --system 2>/dev/null | awk '{p = $2; sub(/^\//, "", p); print $1, "/" p}' > "$BASE/.raw"
         else say "no dpkg, rpm or apk: can't verify packages"; exit 0; fi
         # "FLAG PATH" for changed/missing packaged files; docs, man pages and locales don't matter
-        awk '$2 != "c" && ($1 ~ /5|missing|^U$/) {print ($1 == "missing" ? "missing" : "changed"), $NF}' "$BASE/.raw" |
-            grep -vE ' /usr/share/(man|doc|locale|info|lintian|help|bug|gtk-doc|i18n)/' | sort -u > "$BASE/.verify"
+        # apk: U = changed since installed, A = in a system folder but no package installed it
+        awk '$2 != "c" && ($1 ~ /5|missing|^[UA]$/) {print ($1 == "missing" ? "missing" : ($1 == "A" ? "added" : "changed")), $NF}' "$BASE/.raw" |
+            grep -vE ' /usr/share/(man|doc|locale|info|lintian|help|bug|gtk-doc|i18n)/|\.pyc$|/__pycache__/' | sort -u > "$BASE/.verify"
         conf=$(awk '$2 == "c"' "$BASE/.raw" | wc -l | tr -d ' '); rm -f "$BASE/.raw"
         CRIT=' /(usr/)?(s?bin|libexec)/| /(usr/)?lib(64)?/([^/]+/)?security/| /(usr/)?lib(64)?/.*\.so(\.[0-9]+)*$'
         crit=$(grep -E "$CRIT" "$BASE/.verify")
         [ -n "$crit" ] && echo "$crit" | while read -r flag f; do
-            if [ "$flag" = changed ]; then say "TAMPERED? $f (differs from its package)"; else say "MISSING   $f (packaged file deleted)"; fi
+            case "$flag" in
+                changed) say "TAMPERED? $f (differs from its package)" ;;
+                added) say "NO PACKAGE $f (new file in a system folder: dropped by someone?)" ;;
+                *) say "MISSING   $f (packaged file deleted)" ;;
+            esac
         done | head -40
-        say "$(echo "$crit" | grep -c .) binaries/libraries/PAM modules changed or missing, $(grep -cvE "$CRIT" "$BASE/.verify") other packaged files, $conf config files (config changes are normal after hardening)."
+        say "$(echo "$crit" | grep -c .) binaries/libraries/PAM modules changed, missing or not from a package, $(grep -cvE "$CRIT" "$BASE/.verify") other packaged files, $conf config files (config changes are normal after hardening)."
         echo "$crit" | grep -q '^changed' && say "A changed sshd, sudo, su, login, PAM module or libc is a backdoor until proven otherwise: compare with a clean box, reinstall the package if you have the .deb/.rpm."
         rm -f "$BASE/.verify" ;;
     -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 0 ;;

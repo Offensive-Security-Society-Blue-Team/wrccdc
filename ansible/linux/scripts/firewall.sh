@@ -69,7 +69,9 @@ done
 mkdir -p "$DIR" && chmod 700 "$DIR"
 
 # ---------- helpers ----------
-is_ip()   { echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$'; }
+is_ip()   { echo "$1" | awk -F/ '{ if (NF > 2 || (NF == 2 && ($2 !~ /^[0-9]+$/ || $2 + 0 > 32))) exit 1   # every octet 0-255, mask 0-32
+                                if (split($1, o, ".") != 4) exit 1
+                                for (i = 1; i <= 4; i++) if (o[i] !~ /^[0-9]+$/ || o[i] + 0 > 255) exit 1 }'; }
 is_port() { echo "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 csv_words() { echo "$1" | tr ',' ' '; }
 check_ips() { for x in $(csv_words "$2"); do is_ip "$x" || die "$1: '$x' is not an IPv4 address or CIDR"; done; }
@@ -152,26 +154,28 @@ build_nft() { # writes $DIR/rules.nft
     echo "}"
     } > "$DIR/rules.nft"
 }
+ipt() { iptables "$@" || { echo "[$h] iptables rejected: $*" >&2; : > "$DIR/.iptfail"; }; }
 ipt_ports() { # chain proto portlist target...  (multiport takes at most 15 ports per rule)
     c=$1; pr=$2; pl=$3; shift 3
     echo "$pl" | tr ',' '\n' | awk 'NF' | awk '{ b = b (b ? "," : "") $0; if (NR % 15 == 0) { print b; b = "" } } END { if (b) print b }' | while read -r chunk; do
-        iptables -A "$c" -p "$pr" -m multiport --dports "$chunk" "$@"
+        ipt -A "$c" -p "$pr" -m multiport --dports "$chunk" "$@"
     done
 }
 build_iptables() { # applies directly; RETURN = "not dropped by us", so existing rules after our jump still apply
+    rm -f "$DIR/.iptfail"
     for c in CCDC-IN CCDC-OUT; do iptables -N "$c" 2>/dev/null || iptables -F "$c"; done
     st="-m conntrack --ctstate"; iptables -m conntrack -h >/dev/null 2>&1 || st="-m state --state"
-    iptables -A CCDC-IN -i lo -j RETURN
+    ipt -A CCDC-IN -i lo -j RETURN
     # shellcheck disable=SC2086
-    iptables -A CCDC-IN $st ESTABLISHED,RELATED -j RETURN
-    for s in $(csv_words "$SCORER"); do iptables -A CCDC-IN -s "$s" -j RETURN; done
-    for t in $(csv_words "$TRUSTED"); do iptables -A CCDC-IN -s "$t" -j RETURN; done
-    iptables -A CCDC-IN -p icmp -j RETURN
-    iptables -A CCDC-IN -p udp --dport 68 -j RETURN
+    ipt -A CCDC-IN $st ESTABLISHED,RELATED -j RETURN
+    for s in $(csv_words "$SCORER"); do ipt -A CCDC-IN -s "$s" -j RETURN; done
+    for t in $(csv_words "$TRUSTED"); do ipt -A CCDC-IN -s "$t" -j RETURN; done
+    ipt -A CCDC-IN -p icmp -j RETURN
+    ipt -A CCDC-IN -p udp --dport 68 -j RETURN
     if [ "$STRICT" = 1 ]; then
         [ -n "$PUBLIC" ] && ipt_ports CCDC-IN tcp "$PUBLIC" -j RETURN && ipt_ports CCDC-IN udp "$PUBLIC" -j RETURN
-        iptables -A CCDC-IN -m limit --limit 10/min -j LOG --log-prefix "CCDC-DROP-IN "
-        iptables -A CCDC-IN -j DROP
+        ipt -A CCDC-IN -m limit --limit 10/min -j LOG --log-prefix "CCDC-DROP-IN "
+        ipt -A CCDC-IN -j DROP
     else
         mg=$MGMT_TCP; [ "$RESTRICT_SSH" = 1 ] && mg="$mg,22"
         ipt_ports CCDC-IN tcp "$mg" -m limit --limit 10/min -j LOG --log-prefix "CCDC-DROP-IN "
@@ -179,26 +183,27 @@ build_iptables() { # applies directly; RETURN = "not dropped by us", so existing
         ipt_ports CCDC-IN udp "$MGMT_UDP" -j DROP
     fi
     if [ "$EGRESS" = 1 ]; then
-        iptables -A CCDC-OUT -o lo -j RETURN
+        ipt -A CCDC-OUT -o lo -j RETURN
         # shellcheck disable=SC2086
-        iptables -A CCDC-OUT $st ESTABLISHED,RELATED -j RETURN
-        for s in $(csv_words "$SCORER"); do iptables -A CCDC-OUT -d "$s" -j RETURN; done
-        for t in $(csv_words "$TRUSTED"); do iptables -A CCDC-OUT -d "$t" -j RETURN; done
-        for d in $(csv_words "$DNS"); do iptables -A CCDC-OUT -d "$d" -p udp --dport 53 -j RETURN; iptables -A CCDC-OUT -d "$d" -p tcp --dport 53 -j RETURN; done
-        iptables -A CCDC-OUT -p udp --dport 123 -j RETURN
-        iptables -A CCDC-OUT -p udp --dport 67 -j RETURN
-        iptables -A CCDC-OUT -p icmp -j RETURN
+        ipt -A CCDC-OUT $st ESTABLISHED,RELATED -j RETURN
+        for s in $(csv_words "$SCORER"); do ipt -A CCDC-OUT -d "$s" -j RETURN; done
+        for t in $(csv_words "$TRUSTED"); do ipt -A CCDC-OUT -d "$t" -j RETURN; done
+        for d in $(csv_words "$DNS"); do ipt -A CCDC-OUT -d "$d" -p udp --dport 53 -j RETURN; ipt -A CCDC-OUT -d "$d" -p tcp --dport 53 -j RETURN; done
+        ipt -A CCDC-OUT -p udp --dport 123 -j RETURN
+        ipt -A CCDC-OUT -p udp --dport 67 -j RETURN
+        ipt -A CCDC-OUT -p icmp -j RETURN
         for a in $(csv_words "$ALLOW_OUT"); do
             case "$a" in
-                *:*) iptables -A CCDC-OUT -d "${a%:*}" -p tcp --dport "${a##*:}" -j RETURN; iptables -A CCDC-OUT -d "${a%:*}" -p udp --dport "${a##*:}" -j RETURN ;;
-                *) iptables -A CCDC-OUT -d "$a" -j RETURN ;;
+                *:*) ipt -A CCDC-OUT -d "${a%:*}" -p tcp --dport "${a##*:}" -j RETURN; ipt -A CCDC-OUT -d "${a%:*}" -p udp --dport "${a##*:}" -j RETURN ;;
+                *) ipt -A CCDC-OUT -d "$a" -j RETURN ;;
             esac
         done
-        iptables -A CCDC-OUT -m limit --limit 10/min -j LOG --log-prefix "CCDC-DROP-OUT "
-        iptables -A CCDC-OUT -j DROP
+        ipt -A CCDC-OUT -m limit --limit 10/min -j LOG --log-prefix "CCDC-DROP-OUT "
+        ipt -A CCDC-OUT -j DROP
     fi
-    iptables -C INPUT -j CCDC-IN 2>/dev/null || iptables -I INPUT 1 -j CCDC-IN
-    if [ "$EGRESS" = 1 ]; then iptables -C OUTPUT -j CCDC-OUT 2>/dev/null || iptables -I OUTPUT 1 -j CCDC-OUT; fi
+    iptables -C INPUT -j CCDC-IN 2>/dev/null || ipt -I INPUT 1 -j CCDC-IN
+    if [ "$EGRESS" = 1 ]; then iptables -C OUTPUT -j CCDC-OUT 2>/dev/null || ipt -I OUTPUT 1 -j CCDC-OUT; fi
+    [ ! -f "$DIR/.iptfail" ]
 }
 write_revert() { # standalone undo script, so the timer works after this script is gone
     cat > "$DIR/revert.sh" <<EOF
@@ -232,7 +237,7 @@ stop_timer() {
 }
 save_config() {
     {
-        echo "TRUSTED='$TRUSTED'"; echo "SCORER='$SCORER'"; echo "RESTRICT_SSH=$RESTRICT_SSH"; echo "STRICT=$STRICT"
+        echo "TRUSTED='$TRUSTED'"; echo "SCORER='${SCORER:-none}'"; echo "RESTRICT_SSH=$RESTRICT_SSH"; echo "STRICT=$STRICT"
         echo "PUBLIC='$PUBLIC'"; echo "MGMT_TCP='$MGMT_TCP'"; echo "EGRESS=$EGRESS"; echo "ALLOW_OUT='$ALLOW_OUT'"; echo "BACKEND='$BACKEND'"
     } > "$DIR/config"
     chmod 600 "$DIR/config"

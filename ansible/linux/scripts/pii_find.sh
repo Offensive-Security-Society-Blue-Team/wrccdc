@@ -40,7 +40,7 @@ SSN='(^|[^0-9])[0-9]{3}-[0-9]{2}-[0-9]{4}([^0-9]|$)'
 CARD='(^|[^0-9])([0-9]{4}[ -]?){3}[0-9]{4}([^0-9]|$)|(^|[^0-9])3[47][0-9]{2}[ -]?[0-9]{6}[ -]?[0-9]{5}([^0-9]|$)'
 EMAIL='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z][A-Za-z]+'
 PHONE='(^|[^0-9])\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}([^0-9]|$)'
-SKIP='/(node_modules|vendor|\.git|site-packages|dist-packages|\.cache|\.ccdc-[a-z]+|proc|sys)/'
+SKIP='/(node_modules|vendor|\.git|site-packages|dist-packages|\.cache|\.ccdc-[a-z]+|proc|sys)/|^/var/backups/(dpkg|apt|alternatives)[.]'   # package lists: maintainer emails, not PII
 
 # ---- fast passes: a few greps pick candidate files; only those get the detailed (slower) checks ----
 # shellcheck disable=SC2086
