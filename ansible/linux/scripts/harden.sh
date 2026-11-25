@@ -234,11 +234,16 @@ set_sysctl() {
     for kv in "kernel.dmesg_restrict=1" "kernel.kptr_restrict=1" "kernel.yama.ptrace_scope=1" "fs.protected_symlinks=1" \
               "fs.protected_hardlinks=1" "fs.suid_dumpable=0" "net.ipv4.tcp_syncookies=1" "net.ipv4.conf.all.accept_redirects=0" \
               "net.ipv4.conf.default.accept_redirects=0" "net.ipv4.conf.all.send_redirects=0" "net.ipv4.conf.all.accept_source_route=0" \
-              "net.ipv4.icmp_echo_ignore_broadcasts=1" "net.ipv6.conf.all.accept_redirects=0"; do
+              "net.ipv4.icmp_echo_ignore_broadcasts=1" "net.ipv6.conf.all.accept_redirects=0" "fs.protected_fifos=2" "fs.protected_regular=2" \
+              "kernel.unprivileged_userns_clone=0"; do
         k=${kv%%=*}; [ -e "/proc/sys/$(echo "$k" | tr . /)" ] || continue
+        # unprivileged user namespaces feed many kernel root exploits (idea: CPP ai.sh, DSU patchprivesc.sh);
+        # leave them on if a non-root user runs rootless containers
+        if [ "$k" = kernel.unprivileged_userns_clone ] && ls -d /home/*/.local/share/containers >/dev/null 2>&1; then continue; fi
         echo "$kv"
     done
 }
+ls -d /home/*/.local/share/containers >/dev/null 2>&1 && review "rootless containers found: left unprivileged user namespaces ON"
 if [ "$CHECK" = 1 ]; then did "kernel settings: $(set_sysctl | tr '\n' ' ')"
 else
     mkdir -p /etc/sysctl.d; set_sysctl > "$SYSF"; chmod 644 "$SYSF"
