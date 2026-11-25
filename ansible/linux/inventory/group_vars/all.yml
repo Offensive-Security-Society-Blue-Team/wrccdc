@@ -1,7 +1,8 @@
 # group_vars/all.yml - team-wide settings every playbook reads.
-# Edit the FILL IN lines at 9:00. Everything else has a safe default.
+# Edit the FILL IN lines at the start. Everything else has a safe default.
 
 # --- SSH key (made the night before: ssh-keygen -t ed25519 -f ~/.ssh/inv3) ---
+# The name 'inv3' is just the file name the laptop scripts expect; keep it for every competition.
 # Ansible offers this key first and falls back to the password (-k) until
 # 03_keys.yml has put the public half on each box.
 ansible_ssh_private_key_file: ~/.ssh/inv3
@@ -35,5 +36,5 @@ wazuh_manager_ip: "CHANGE_ME"
 wazuh_enroll_password: "CHANGE_ME"
 # IPs Wazuh must never auto-block (scoring engine, your own machines)
 wazuh_whitelist_ips: []
-# Accept syslog from the OpenWRT router (vigra) on UDP 514
-wazuh_router_syslog_ip: "192.168.220.2"
+# Accept syslog from the OpenWRT router on UDP 514
+wazuh_router_syslog_ip: ""      # FILL IN: router IP, or leave "" to skip

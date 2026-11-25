@@ -125,12 +125,14 @@
         marker: "<!-- {mark} BLUE TEAM -->"
         block: |
           <ossec_config>
+          {% if wazuh_router_syslog_ip | default('') | length > 0 %}
             <remote>
               <connection>syslog</connection>
               <port>514</port>
               <protocol>udp</protocol>
               <allowed-ips>{{ wazuh_router_syslog_ip }}</allowed-ips>
             </remote>
+          {% endif %}
           {% if wazuh_whitelist_ips | length > 0 %}
             <global>
           {% for ip in wazuh_whitelist_ips %}

@@ -1,13 +1,13 @@
-# inv3-ansible: Team 12 Linux kit (WCComps INV3)
+# WRCCDC Linux Ansible kit
 
-Lock down, back up, and watch the 7 Linux boxes from one control node.
+Lock down, back up, and watch every Linux box from one control node.
 Run every command from inside this folder (`cd ansible/linux`): `ansible.cfg` only loads from here.
 
 ```
 ansible/linux/
 ├── ansible.cfg
 ├── inventory/
-│   ├── hosts.ini              # the 7 Linux boxes + router/Windows (kept out of [linux])
+│   ├── hosts.ini              # FILL IN: one line per box; router/Windows kept out of [linux]
 │   └── group_vars/all.yml     # FILL IN: scored users, Wazuh settings
 ├── 00_bootstrap.yml           # Python on Alpine + RAM/CPU per box
 ├── 01_audit.yml               # first-pass user + cron audit -> out/<time>/ (run once at the start)
@@ -50,7 +50,7 @@ Run scripts through `run.sh`. It works like `ansible <hosts> -m script -a ...`, 
 ```bash
 ./run.sh linux verify_clean.sh                    # team keys are filled in for you
 ./run.sh -g '=====|\[!\]' linux hunt.sh           # screen: only the flags; file: everything
-./run.sh haf,djupi lockdown_ssh.sh
+./run.sh web01,db01 lockdown_ssh.sh
 ./run.sh linux harden.sh --rotate '' --check
 ```
 
@@ -74,7 +74,7 @@ ansible-inventory --graph      # should show debian / rhel / alpine under linux
 
 ## At 9:00
 
-1. In `inventory/hosts.ini`, set `ansible_user=` under `[debian:vars]`. At INV3 every box (debian too) took `root`, so no `-K` was needed. If you log in as a sudo user instead, add `-K` to every command below. If the control node is outside 192.168.220.0/24, switch the IPs to 10.100.112.x.
+1. In `inventory/hosts.ini`, add one line per box from the packet (uncomment an example and change it), then set `ansible_user=` under `[debian:vars]`. At INV3 every box (debian too) took `root`, so no `-K` was needed. If you log in as a sudo user instead, add `-K` to every command below. If the control node is outside the internal network, use the external (NAT) IPs. Check with `ansible-inventory --graph`.
 2. In `inventory/group_vars/all.yml`, list the Quotient-scored accounts under `scored_users`.
 3. Different password per box? Add `ansible_password=...` to that host's line for now. Delete it once 03 says KEY LOGIN OK.
 
@@ -88,7 +88,7 @@ ansible-inventory --graph      # should show debian / rhel / alpine under linux
 | 03 | `ansible-playbook 03_keys.yml -k` | `KEY LOGIN OK` per box. From here on `-k` is no longer needed. |
 | 03b | **Right after 03:** [close every door](#close-every-door-right-after-03) | `FIXED` / `ok` lines and `revoked IDs:`. Then 04 changes the passwords |
 | 04 | `ansible-playbook 04_passwords.yml --check`, then without `--check` | the CHANGING / skipped lists, then `loot/passwords/<host>-<time>.csv` |
-| 05 | `ANSIBLE_LOG_PATH=/dev/null ansible haf -m script -a "scripts/harden.sh --rotate '' --check"`, then without `--check`, check scoring, then `linux` | `DONE:` / `WOULD:` lines, `sshd now:` settings, and a `REVIEW:` list for a human to decide |
+| 05 | `ANSIBLE_LOG_PATH=/dev/null ansible <one-host> -m script -a "scripts/harden.sh --rotate '' --check"`, then without `--check`, check scoring, then `linux` | `DONE:` / `WOULD:` lines, `sshd now:` settings, and a `REVIEW:` list for a human to decide |
 | 06 | `ansible-playbook 06_wazuh.yml` | manager version, then an agent list with every box `Active` |
 
 **`-k` and `-K`:** `-k` asks for the SSH password, which you only need until 03 has run. `-K` asks for the sudo password, only needed if `[debian:vars]` logs in as a sudo user instead of root.
@@ -101,7 +101,7 @@ We removed keys first. Removing keys does nothing against a certificate, so it k
 Close all the doors on all boxes in the same few minutes, then do 04 (passwords):
 
 ```bash
-RED="10.194.194.85 10.197.207.23"     # red team IPs from the logs. Check first that none of them is the scoring engine
+RED="<red-ip-1> <red-ip-2>"     # red team IPs from the logs (./ip_map.sh). Check first that none of them is the scoring engine
 ansible linux -m raw -a "for ip in $RED; do ip route add blackhole \$ip/32 2>/dev/null; ss -K dst \$ip >/dev/null 2>&1; done; ip route | grep blackhole"
 ./keys_pick.sh -l linux -y
 for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert"; do ansible linux -m script -a "scripts/$s"; done | grep -E "=====|FIXED|FAILED|revoked IDs"
@@ -114,7 +114,7 @@ for s in lockdown_ssh.sh "revoke_certs.sh forged-root-cert"; do ansible linux -m
 
 ## Clean-up pass (after 03, once you know the red team's tricks)
 
-Run these in order, on one or two boxes first (`-l haf,djupi`), then on `linux`:
+Run these in order, on one or two boxes first (`-l web01,db01`), then on `linux`:
 
 ```bash
 ./keys_pick.sh -l linux --check        # table of every key on every box + what WOULD be removed
@@ -139,7 +139,7 @@ ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/tea
 
 ## Who is who, then the firewall
 
-Never block an IP until you know who it is (INV3: we blocked teammate `.25`, and firewalld blocked the scorer on thorska).
+Never block an IP until you know who it is (INV3: we blocked a teammate, and firewalld blocked the scorer on the CA box).
 
 ```bash
 ./ip_map.sh                       # table: IP, WHO, HOW SURE, evidence. Also writes loot/ipmap-<time>.md/.csv
@@ -147,11 +147,11 @@ Never block an IP until you know who it is (INV3: we blocked teammate `.25`, and
 ```
 
 - **It only suggests.** `certain` = our boxes, the gateway, or a login with our team key. `likely`/`possible` are guesses from the logs. `ASK TEAM` = logged in as root but matches nothing: ask in chat before blocking.
-- **Confirm, then write it down** in `files/ipmap_labels.txt` (`scorer 10.234.234.234 from packet`). Labels always win over guesses. Re-run, and the printed `--trusted`/`--scorer` flags have no `*` left.
+- **Confirm, then write it down** in `files/ipmap_labels.txt` (`scorer <scorer-ip> from packet`). Labels always win over guesses. Re-run, and the printed `--trusted`/`--scorer` flags have no `*` left.
 
 ```bash
-ansible haf -m script -a "scripts/firewall.sh plan --trusted 192.168.220.0/24 --scorer 10.234.234.234"   # shows the rules, changes nothing
-ansible linux -m script -a "scripts/firewall.sh test 120 --trusted 192.168.220.0/24 --scorer 10.234.234.234"
+ansible <one-host> -m script -a "scripts/firewall.sh plan --trusted <lan-cidr> --scorer <scorer-ip>"   # shows the rules, changes nothing
+ansible linux -m script -a "scripts/firewall.sh test 120 --trusted <lan-cidr> --scorer <scorer-ip>"
 #   check the scoreboard inside the 120 seconds, then:
 ansible linux -m script -a "scripts/firewall.sh confirm"
 ansible linux -m script -a "scripts/firewall.sh status"    # top dropped sources = more red-team IPs
@@ -186,7 +186,7 @@ One line per box: `<host>: certauth=<n> CLEAN`, or the list of what came back (`
 - **`UNKNOWN-KEYS=`** counts keys that are neither a team key nor a `cert-authority` line, in every key file sshd reads. It catches keys like `root@localhost` that a list of known-bad names misses. Fix it with `./keys_pick.sh -l <host>`. Running verify_clean without key arguments falls back to the known INV3 red keys only (`RED-KEYS`).
 - **`RED-SESSION=<ports>`**: a red team IP is connected right now, to these ports on the box. `22` = an SSH session (they're in). Another port, like `3306` (MySQL) or `80`, means they're hitting that service, not logged in. `out:<port>` = the box connected out to them (reverse shell or implant). Look with `ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"`, then kill the PID, or on ss boxes `ss -K dst <ip>`. The blackhole route in [close every door](#close-every-door-right-after-03) stops all of these at once.
 - **`ROOT-CERT-CA`**: root can log in with any certificate a `TrustedUserCAKeys` CA signs (the INV3 forged-root-cert door). Re-run `lockdown_ssh.sh` on that host. If it says "already blocked" but the flag stays, another `Match` block comes first: check `sshd -T -C user=root,host=x,addr=1.2.3.4 | grep -i principals`.
-- **`MEMFD-PROC=<pid>`**: a program running from memory with no file on disk (the INV3 kvigindis implant). The clean-up pass does not kill these: look first with `./run.sh <host> implant_triage.sh`, then `kill <pid>` once you know what restarts it.
+- **`MEMFD-PROC=<pid>`**: a program running from memory with no file on disk (the INV3 implant). The clean-up pass does not kill these: look first with `./run.sh <host> implant_triage.sh`, then `kill <pid>` once you know what restarts it.
 - **`SVC_HEALTH`**: the red team account can log in again (real shell and unlocked password). Re-run `cleanup_persist.sh`, then find what re-created it (`cron_audit.sh`).
 - **Anything else:** re-run the clean-up pass on that host (`-l <host>`).
 
@@ -204,7 +204,7 @@ ansible linux -m script -a "scripts/account_use.sh svc_health"          # is thi
 **`--since`** (hunt, cron_audit, user_audit): the boxes start clean at 09:00, so a file changed after that is either us or the red team. Without it, "recent" means the last 2 days (`RECENT_DAYS`), which also flags the setup the organizers did before the event. Pass `@$START` (seconds, worked out on your laptop) rather than `09:00`: some boxes keep their clock in another time zone, and `09:00` would mean their 09:00. Keep a note of what the team changes, so the rest stands out.
 
 `01_audit.yml` is still useful for a first pass at 9:00. After that, verify_clean and hunt replace re-running it.
-Re-run **02** after big fixes: `ansible-playbook 02_backup.yml -l 'linux:!gufu' | grep -E "saved|TOO BIG|failed="` (gufu's backup is too big; back it up by hand).
+Re-run **02** after big fixes: `ansible-playbook 02_backup.yml | grep -E "saved|TOO BIG|failed="`. A box whose backup is too big stays on the box; exclude it with `-l 'linux:!<host>'` and back it up by hand (`scripts/backup.sh`).
 
 ## PHP2Shell (CVE-2026-109618/109619)
 
@@ -221,12 +221,11 @@ The stopgap writes `99-php2shell.ini` into every PHP `conf.d` and restarts php-f
 
 ```bash
 ansible linux -m script -a "scripts/reissue_hostcert.sh" | grep -E "=====|OK|FAILED|skipped|reloaded"   # SSH host certs
-ansible haf   -m script -a "scripts/reissue_cert.sh /etc/step/renew/haf.env"      # TLS cert, one .env per cert
-ansible djupi -m script -a "scripts/reissue_cert.sh /etc/step/renew/pos.env"
-ansible skerja -m script -a "scripts/reissue_cert.sh /etc/step/skerja-https.env" | grep -E "=====|new cert|FAILED"
+ansible <host> -m script -a "scripts/reissue_cert.sh /etc/step/renew/<name>.env"   # TLS cert, one .env per cert
+ansible <host> -m script -a "scripts/reissue_cert.sh /etc/step/<name>.env" | grep -E "=====|new cert|FAILED"   # .env outside renew/
 ```
 
-- **No .env on a box** (skerja had none): write one with `CA_URL`, `ROOT_FILE`, `CERT_FILE`, `KEY_FILE`, `KEY_PASSWORD_FILE` and `RELOAD_UNIT`. List the existing ones with `ls /etc/step/renew/`.
+- **No .env on a box** (one INV3 box had none): write one with `CA_URL`, `ROOT_FILE`, `CERT_FILE`, `KEY_FILE`, `KEY_PASSWORD_FILE` and `RELOAD_UNIT`. List the existing ones with `ls /etc/step/renew/`.
 - **No `/etc/step/root_ca.crt`:** copy it over first: `ansible <host> -m copy -a "src=/tmp/root_ca.crt dest=/etc/step/root_ca.crt mode=0644"`.
 - **Alpine:** `reissue_cert.sh` reloads with `systemctl`, which Alpine doesn't have. Reload by hand: `rc-service apache2 reload`.
 
