@@ -26,6 +26,7 @@ ansible/linux/
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today
     ├── ip_collect.sh          # READ-ONLY  on-box half of ip_map.sh (every IP in the logs, connections, drops)
+    ├── vuln_hunt.sh [PW]      # READ-ONLY  attack patterns: who can become root, defaults left on, containers/k8s, CI runners
     ├── pii_find.sh [--deep]   # READ-ONLY  SSNs, card numbers, key files, dumps; flags ones served by web/FTP/SMB
     ├── db_audit.sh [opts]     # READ-ONLY  MySQL/Postgres/Redis holes (--fix, --rotate, --log-queries change things)
     ├── baseline.sh snap|diff  # CHANGES    only /root/.ccdc-baseline: snapshot now, diff later, verify package files
