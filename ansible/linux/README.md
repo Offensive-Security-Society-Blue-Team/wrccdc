@@ -18,12 +18,18 @@ ansible/linux/
 ├── files/agent.conf           # what Wazuh watches (pushed to every agent)
 ├── run.sh                     # LAPTOP     run any scripts/*.sh on boxes + save the output to out/  <- use this
 ├── keys_pick.sh               # LAPTOP     table of every SSH key on every box; keep what you pick, remove the rest
+├── ip_map.sh                  # LAPTOP     who is who: labels every IP TEAM/SCORER/BLACK/RED/ASK TEAM with evidence
 └── scripts/                   # run with: ansible <hosts> -m script -a "scripts/<name>.sh [args]"
     ├── verify_clean.sh [KEY..]# READ-ONLY  one line per box: CLEAN or what came back  <- the main check
     ├── hunt.sh                # READ-ONLY  live triage: reverse shells, /tmp procs, SUID, changed package files, web shells, ptrace, backdoor ports
     ├── account_use.sh <user>  # READ-ONLY  is this account in use (logins, sudo, processes, history)
     ├── implant_triage.sh [n]  # READ-ONLY  memfd/fileless programs + planted binary (default dbus_session)
     ├── php_find.sh            # READ-ONLY  PHP versions, PHP2Shell patch status, PHP files changed today
+    ├── ip_collect.sh          # READ-ONLY  on-box half of ip_map.sh (every IP in the logs, connections, drops)
+    ├── pii_find.sh [--deep]   # READ-ONLY  SSNs, card numbers, key files, dumps; flags ones served by web/FTP/SMB
+    ├── db_audit.sh [opts]     # READ-ONLY  MySQL/Postgres/Redis holes (--fix, --rotate, --log-queries change things)
+    ├── baseline.sh snap|diff  # CHANGES    only /root/.ccdc-baseline: snapshot now, diff later, verify package files
+    ├── firewall.sh CMD [opts] # CHANGES    host firewall in its own table, scorer always allowed, test mode auto-reverts
     ├── keys_apply.sh          # CHANGES    on-box half of keys_pick.sh (don't run it by hand)
     ├── harden.sh [opts]       # CHANGES    sshd, team keys, passwords, sudo, sysctl, perms, history, auditd + REVIEW list
     ├── lockdown_ssh.sh        # CHANGES    /etc/ssh/.ssh, red keys on root, AuthorizedKeysFile, root certs
@@ -130,6 +136,44 @@ ansible linux -m script -a "scripts/verify_clean.sh $(awk '{print $2}' files/tea
   - **Scored users are not read from `group_vars`.** List them yourself with `--exclude`.
   - **Riskier options are off by default:** `--no-password-login`, `--root-keys-only`, `--no-forwarding`, `--strip-nopasswd`, `--allowlist-keys`. `--check` previews everything.
 - All of these are safe to re-run.
+
+## Who is who, then the firewall
+
+Never block an IP until you know who it is (INV3: we blocked teammate `.25`, and firewalld blocked the scorer on thorska).
+
+```bash
+./ip_map.sh                       # table: IP, WHO, HOW SURE, evidence. Also writes loot/ipmap-<time>.md/.csv
+./ip_map.sh --top                 # plus Top-10 sources / failed logins / usernames (inject material)
+```
+
+- **It only suggests.** `certain` = our boxes, the gateway, or a login with our team key. `likely`/`possible` are guesses from the logs. `ASK TEAM` = logged in as root but matches nothing: ask in chat before blocking.
+- **Confirm, then write it down** in `files/ipmap_labels.txt` (`scorer 10.234.234.234 from packet`). Labels always win over guesses. Re-run, and the printed `--trusted`/`--scorer` flags have no `*` left.
+
+```bash
+ansible haf -m script -a "scripts/firewall.sh plan --trusted 192.168.220.0/24 --scorer 10.234.234.234"   # shows the rules, changes nothing
+ansible linux -m script -a "scripts/firewall.sh test 120 --trusted 192.168.220.0/24 --scorer 10.234.234.234"
+#   check the scoreboard inside the 120 seconds, then:
+ansible linux -m script -a "scripts/firewall.sh confirm"
+ansible linux -m script -a "scripts/firewall.sh status"    # top dropped sources = more red-team IPs
+```
+
+- **Refuses to run without `--scorer`** (`--scorer none` if you really mean it). Your own SSH IP is always added to trusted.
+- **Own table/chains only** (`table ip ccdc` or `CCDC-IN`/`CCDC-OUT`): firewalld, ufw and Docker rules stay as they are. Undo everything: `firewall.sh revert`.
+- **Default:** everyone reaches SSH and web; databases, SMB, RDP, WinRM, k8s API and admin panels only from trusted. Outbound new connections only to trusted, scorer, DNS and NTP (kills reverse shells). `--restrict-ssh` makes SSH trusted-only; `--no-egress` turns the outbound part off.
+- **Not covered:** IPv6, and traffic to published container ports (FORWARD).
+
+## Baseline, data and databases (once, early)
+
+```bash
+ansible linux -m script -a "scripts/baseline.sh snap"     # first snap is T0. Take another after hardening
+ansible linux -m script -a "scripts/baseline.sh diff"     # every 15-30 min: '+' lines are new since T0
+ansible linux -m script -a "scripts/baseline.sh verify"   # package files changed on disk (trojaned ssh, PAM, .so)
+ansible linux -m script -a "scripts/db_audit.sh"          # then --fix / --rotate USER@HOST on the box that needs it
+ansible linux -m script -a "scripts/pii_find.sh"          # *-EXPOSED lines first: move them, write an incident report
+```
+
+- **`db_audit.sh --rotate`** prints the new password once as a `PW|` line (use `ANSIBLE_LOG_PATH=/dev/null`) and lists app config files that use the account. Update those or the app breaks. Scored DB accounts change only through a PCR.
+- **`pii_find.sh`** prints counts and masked samples, never full numbers.
 
 ## Watching (every 10-15 minutes)
 
