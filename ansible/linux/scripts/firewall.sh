@@ -26,6 +26,9 @@
 #   --no-egress         don't filter outbound connections
 #   --allow-out LIST    extra outbound destinations: IP, CIDR or IP:PORT (comma list)
 #   --backend nft|iptables   force a backend (default: nft if it works, else iptables)
+#   --no-container-nets don't auto-trust Docker/Podman/k8s bridge and pod networks on this box
+#   --kill-existing     also cut connections to/from untrusted IPs that are already open (live reverse shells);
+#                       without it they survive, because established connections are always allowed
 #   --saved             reuse the options from the last test/apply
 # Example (Ansible):
 #   ansible linux -m script -a "scripts/firewall.sh plan --trusted 192.168.220.0/24 --scorer 10.234.234.234"
@@ -44,12 +47,15 @@ CMD=${1:-help}; [ $# -gt 0 ] && shift
 SECS=90
 case "$CMD" in test) case "${1:-}" in ''|-*) ;; *) SECS=$1; shift;; esac;; esac
 TRUSTED=""; SCORER=""; RESTRICT_SSH=0; STRICT=0; PUBLIC=""; MGMT_TCP=$MGMT_TCP_DEFAULT; EGRESS=1; ALLOW_OUT=""; BACKEND=""
+CONTAINER_NETS=1; KILL=0
 case " $* " in *" --saved "*)
     [ -f "$DIR/config" ] || { echo "[$h] ERROR: no saved config yet ($DIR/config)"; exit 1; }
     # shellcheck disable=SC1091
     . "$DIR/config" ;;
 esac
 while [ $# -gt 0 ]; do
+    case "$1" in --trusted|--scorer|--public|--mgmt|--allow-out|--backend)
+        case "${2:-}" in ''|--*) echo "[$h] ERROR: $1 needs a value"; exit 1;; esac;; esac
     case "$1" in
         --trusted) TRUSTED=$2; shift ;;
         --scorer) SCORER=$2; shift ;;
@@ -60,6 +66,8 @@ while [ $# -gt 0 ]; do
         --no-egress) EGRESS=0 ;;
         --allow-out) ALLOW_OUT=$2; shift ;;
         --backend) BACKEND=$2; shift ;;
+        --no-container-nets) CONTAINER_NETS=0 ;;
+        --kill-existing) KILL=1 ;;
         --saved) ;;
         *) die "unknown option: $1" ;;
     esac
@@ -83,7 +91,51 @@ dns_servers() {
     done | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | grep -v '^127\.' | sort -u | tr '\n' ',' | sed 's/,$//'
 }
 my_subnets() { ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {print $4}' | tr '\n' ' '; }
-ssh_client_ip() { echo "${SSH_CONNECTION:-${SSH_CLIENT:-}}" | awk '{print $1}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+ssh_client_ip() { # sudo (Ansible become) drops SSH_CONNECTION, so also look in our parent processes' environment
+    c=${SSH_CONNECTION:-${SSH_CLIENT:-}}; p=$$
+    while [ -z "$c" ] && [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+        c=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p; s/^SSH_CLIENT=//p' | head -n 1)
+        p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+    done
+    echo "$c" | awk '{print $1}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+}
+net_of() { awk -F/ '{ m = ($2 == "") ? 32 : $2; split($1, o, "."); n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; d = 2 ^ (32 - m); n = int(n / d) * d
+                      printf "%d.%d.%d.%d/%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256, m }'; }
+container_nets() { # Docker/Podman/libvirt bridges and k8s pod networks on this box (pods must reach the API server and kubelet)
+    {
+        ip -4 -o addr show 2>/dev/null | awk '$2 ~ /^(docker|br-|cni|flannel|podman|cali|vxlan|kube|virbr|lxcbr|lxdbr|cilium|weave)/ {print $4}'
+        if has k3s || [ -d /etc/rancher/k3s ]; then
+            for k in cluster-cidr:10.42.0.0/16 service-cidr:10.43.0.0/16; do
+                v=$(sed -n "s/^ *${k%%:*}: *[\"']\{0,1\}\([0-9./]*\).*/\1/p" /etc/rancher/k3s/config.yaml 2>/dev/null | head -n 1); echo "${v:-${k#*:}}"
+            done
+        fi
+    } | while read -r n; do is_ip "$n" && echo "$n" | net_of; done | sort -u | tr '\n' ',' | sed 's/,$//'
+}
+untrusted_conns() { # "ip proc" for open TCP connections whose peer is not loopback, trusted or scorer
+    if has ss; then ss -tnp 2>/dev/null | awk '$1 == "ESTAB" {print $5, $6}'
+    else netstat -tnp 2>/dev/null | awk '$6 == "ESTABLISHED" {print $5, $7}'; fi |
+    awk -v nets="$TRUSTED,$SCORER" '
+        function num(ip, o) { split(ip, o, "."); return ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4] }
+        BEGIN { k = split(nets, L, ",") }
+        { ip = $1; sub(/:[0-9]+$/, "", ip); sub(/^\[(::ffff:)?/, "", ip); sub(/\]$/, "", ip)
+          if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || ip ~ /^127\./) next
+          for (i = 1; i <= k; i++) { if (L[i] == "") continue; split(L[i], p, "/"); d = 2 ^ (32 - ((p[2] == "") ? 32 : p[2]))
+                                     if (int(num(ip) / d) == int(num(p[1]) / d)) next }
+          pr = $2; sub(/.*\(\("/, "", pr); sub(/".*/, "", pr); sub(/^[0-9]+\//, "", pr); print ip, (pr == "" ? "?" : pr) }' | sort -u
+}
+report_conns() { # survivors of the firewall; with --kill-existing, cut them
+    u=$(untrusted_conns); [ -n "$u" ] || return 0
+    if [ "$KILL" = 1 ]; then
+        for ip in $(echo "$u" | awk '{print $1}' | sort -u); do
+            has conntrack && { conntrack -D -s "$ip" >/dev/null 2>&1; conntrack -D -d "$ip" >/dev/null 2>&1; }
+            has ss && ss -K dst "$ip" >/dev/null 2>&1
+            say "cut open connections with $ip ($(echo "$u" | awk -v i="$ip" '$1 == i {print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//'))"
+        done
+    else
+        say "open connections with untrusted IPs (these SURVIVE the firewall; check them, or re-run with --kill-existing):"
+        echo "$u" | sed "s/^/[$h]   /"
+    fi
+}
 pick_backend() {
     if [ -n "$BACKEND" ]; then echo "$BACKEND"; return; fi
     if has nft && nft list tables >/dev/null 2>&1; then echo nft
@@ -92,7 +144,7 @@ pick_backend() {
 }
 listening() {
     if has ss; then ss -tulnp 2>/dev/null | tail -n +2 | awk '{n = split($5, a, ":"); pr = $7; sub(/users:\(\("/, "", pr); sub(/".*/, "", pr); print $1, a[n], pr}'
-    else netstat -tulnp 2>/dev/null | awk 'NR > 2 {n = split($4, a, ":"); pr = $NF; sub(/^[0-9]+\//, "", pr); print $1, a[n], pr}'; fi | sort -u -k2,2n
+    else netstat -tulnp 2>/dev/null | awk 'NR > 2 {n = split($4, a, ":"); pr = $NF; sub(/^[0-9]+\//, "", pr); print $1, a[n], pr}'; fi | sort -u | sort -k2,2n -k1,1
 }
 in_list() { case ",$2," in *",$1,"*) return 0;; esac; return 1; }
 
@@ -238,7 +290,7 @@ stop_timer() {
 save_config() {
     {
         echo "TRUSTED='$TRUSTED'"; echo "SCORER='${SCORER:-none}'"; echo "RESTRICT_SSH=$RESTRICT_SSH"; echo "STRICT=$STRICT"
-        echo "PUBLIC='$PUBLIC'"; echo "MGMT_TCP='$MGMT_TCP'"; echo "EGRESS=$EGRESS"; echo "ALLOW_OUT='$ALLOW_OUT'"; echo "BACKEND='$BACKEND'"
+        echo "PUBLIC='$PUBLIC'"; echo "MGMT_TCP='$MGMT_TCP'"; echo "EGRESS=$EGRESS"; echo "ALLOW_OUT='$ALLOW_OUT'"; echo "BACKEND='$BACKEND'"; echo "CONTAINER_NETS=$CONTAINER_NETS"
     } > "$DIR/config"
     chmod 600 "$DIR/config"
 }
@@ -251,7 +303,7 @@ warn_others() {
     fi
     has ufw && ufw status 2>/dev/null | grep -q 'Status: active' && say "note: ufw is active; its rules still apply on top of these"
     { has docker || has podman || has kubectl || has k3s; } && say "note: containers present; traffic to published container ports goes through FORWARD and is not filtered here"
-    ip -6 route show default 2>/dev/null | grep -q . && say "note: this box has an IPv6 default route; only IPv4 is filtered"
+    { ip -6 route show default 2>/dev/null; ip -6 -o addr show scope global 2>/dev/null; } | grep -q . && say "note: this box has IPv6 (global/ULA address or default route); only IPv4 is filtered"
 }
 preflight() {
     [ -n "$TRUSTED" ] || die "--trusted is required (your LAN/VPN/team/black team). Subnets on this box: $(my_subnets)"
@@ -263,6 +315,10 @@ preflight() {
     for a in $(csv_words "$ALLOW_OUT"); do is_ip "${a%:*}" || die "--allow-out: bad address in '$a'"; case "$a" in *:*) is_port "${a##*:}" || die "--allow-out: bad port in '$a'";; esac; done
     me=$(ssh_client_ip)
     if [ -n "$me" ] && ! in_list "$me" "$TRUSTED"; then TRUSTED="$TRUSTED,$me"; say "added your current SSH client $me to trusted so this session survives"; fi
+    [ -z "$me" ] && say "WARNING: could not find your SSH client IP; make sure the Ansible host / jump host is in --trusted"
+    if [ "$CONTAINER_NETS" = 1 ]; then
+        for n in $(csv_words "$(container_nets)"); do in_list "$n" "$TRUSTED" || { TRUSTED="$TRUSTED,$n"; say "trusted container/pod network $n (--no-container-nets to skip)"; }; done
+    fi
     DNS=$(dns_servers)
 }
 apply_rules() {
@@ -287,18 +343,21 @@ case "$CMD" in
         [ -z "$SCORER" ] && say "scorer: NOT SET (test/apply will refuse until --scorer is given)"
         [ -z "$TRUSTED" ] && say "trusted: NOT SET (suggestion: the subnets above, plus VPN/teammate/black team IPs)"
         listening | while read -r pr p proc; do printf '[%s]   %-4s %-6s %-18s -> %s\n' "$h" "$pr" "$p" "${proc:--}" "$(port_fate "$pr" "$p")"; done
+        cn=$( [ "$CONTAINER_NETS" = 1 ] && container_nets ); [ -n "$cn" ] && say "container/pod networks (auto-trusted): $cn"
+        KILL=0; report_conns
         [ "$EGRESS" = 1 ] && say "outbound: new connections only to trusted, scorer, DNS (${DNS:-none}), NTP${ALLOW_OUT:+, $ALLOW_OUT}" || say "outbound: not filtered"
         warn_others ;;
     test)
         is_port "$SECS" || die "test SECONDS must be a number"
         preflight; apply_rules; start_timer
+        report_conns
         say "TEST MODE: rules undo themselves in ${SECS}s. Check the scoreboard and your services now, then run: firewall.sh confirm"
         warn_others ;;
     confirm)
         [ -f "$DIR/pending" ] || { say "nothing pending (no test running, or it already reverted: see $DIR/history.log)"; exit 0; }
         stop_timer; echo "$(date '+%F %T') confirmed" >> "$DIR/history.log"; say "kept. Rules stay until 'revert' or a reboot ('apply --saved' after a reboot)" ;;
     apply)
-        preflight; stop_timer; apply_rules; warn_others ;;
+        preflight; stop_timer; apply_rules; report_conns; warn_others ;;
     revert)
         stop_timer; [ -f "$DIR/revert.sh" ] && sh "$DIR/revert.sh" manual; say "firewall rules removed" ;;
     status)
@@ -315,5 +374,5 @@ case "$CMD" in
         fi
         warn_others ;;
     *)
-        sed -n '2,32p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 1 ;;
+        sed -n '2,35p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

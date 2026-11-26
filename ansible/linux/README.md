@@ -147,7 +147,10 @@ Never block an IP until you know who it is (INV3: we blocked a teammate, and fir
 ./ip_map.sh --top                 # plus Top-10 sources / failed logins / usernames (inject material)
 ```
 
-- **It only suggests.** `certain` = our boxes, the gateway, or a login with our team key. `likely`/`possible` are guesses from the logs. `ASK TEAM` = logged in as root but matches nothing: ask in chat before blocking.
+- **It only suggests.** `certain` = our boxes, the gateway, or a login with our team key. `likely`/`possible` are guesses from the logs. `ASK TEAM` = logged in as root but matches nothing, or as root with a certificate whose ID claims black team/scoring: ask in chat before blocking.
+- **Certificate IDs are not proof.** Whoever signs a cert types its ID, and INV3's forged cert could have said "black-team". An IP that is BLACK only because of its cert ID is never put in `--trusted`; it is listed separately to confirm.
+- **Not counted as attacks:** requests to `wp-login`, `xmlrpc`, `phpmyadmin`, `manager/html`, `cgi-bin` (the scorer checks these too; they show as evidence only), and Node/Python/PHP apps answering clients. Interpreters count as a shell only when the box connected *out*.
+- **A `*` on a suggested subnet** means it contains a RED / ASK TEAM IP or is wider than /16. firewall.sh refuses `*`, so decide first.
 - **Confirm, then write it down** in `files/ipmap_labels.txt` (`scorer <scorer-ip> from packet`). Labels always win over guesses. Re-run, and the printed `--trusted`/`--scorer` flags have no `*` left.
 
 ```bash
@@ -158,9 +161,11 @@ ansible linux -m script -a "scripts/firewall.sh confirm"
 ansible linux -m script -a "scripts/firewall.sh status"    # top dropped sources = more red-team IPs
 ```
 
-- **Refuses to run without `--scorer`** (`--scorer none` if you really mean it). Your own SSH IP is always added to trusted.
+- **Refuses to run without `--scorer`** (`--scorer none` if you really mean it). Your own SSH IP is added to trusted, also under Ansible `become` (found from the parent sudo/sshd process). If it can't be found it says so: then put the Ansible/jump host in `--trusted` yourself.
+- **Container and pod networks are trusted automatically** (docker0, br-*, cni0, flannel, podman, libvirt..., and k3s `10.42.0.0/16` + `10.43.0.0/16` or the CIDRs in `/etc/rancher/k3s/config.yaml`), so pods still reach the k8s API (6443) and the kubelet (10250). `--no-container-nets` turns that off.
 - **Own table/chains only** (`table ip ccdc` or `CCDC-IN`/`CCDC-OUT`): firewalld, ufw and Docker rules stay as they are. Undo everything: `firewall.sh revert`.
-- **Default:** everyone reaches SSH and web; databases, SMB, RDP, WinRM, k8s API and admin panels only from trusted. Outbound new connections only to trusted, scorer, DNS and NTP (kills reverse shells). `--restrict-ssh` makes SSH trusted-only; `--no-egress` turns the outbound part off.
+- **Default:** everyone reaches SSH and web; databases, SMB, RDP, WinRM, k8s API and admin panels only from trusted. Outbound new connections only to trusted, scorer, DNS and NTP (stops *new* reverse shells). `--restrict-ssh` makes SSH trusted-only; `--no-egress` turns the outbound part off.
+- **Shells already connected survive** (established connections are allowed). `test`/`apply` list open connections with untrusted IPs; add `--kill-existing` to cut them (conntrack entries and sockets). That also drops in-flight connections of ordinary untrusted clients, who simply reconnect.
 - **Not covered:** IPv6, and traffic to published container ports (FORWARD).
 
 ## Baseline, data and databases (once, early)

@@ -55,7 +55,10 @@ import collections, csv, ipaddress, json, os, re, sys
 src, labels_path, fp_path, users_arg, top, out_base, top_path = sys.argv[1:8]
 TEAMFP = {l.strip() for l in open(fp_path) if l.strip()}
 SCORED = {u for u in users_arg.split(",") if u}
-SHELLS = {"bash", "sh", "dash", "ash", "zsh", "ksh", "python", "python2", "python3", "perl", "ruby", "php", "nc", "ncat", "netcat", "socat", "node", "lua", "busybox", "telnet"}
+SHELLS = {"bash", "sh", "dash", "ash", "zsh", "ksh", "nc", "ncat", "netcat", "socat", "busybox", "telnet"}
+# interpreters also run real apps (Node, Flask, PHP...): they only count when the box connected OUT
+INTERP = {"python", "python2", "python3", "perl", "ruby", "php", "node", "nodejs", "lua"}
+BLACKID = re.compile(r"competition|infra|black|vault|scor", re.I)
 
 labels = []
 for line in open(labels_path):
@@ -70,7 +73,7 @@ def label_for(ip):
     return best
 
 def blank(): return {"hosts": set(), "svcs": set(), "ok": [], "fail": 0, "fusers": 0, "web": 0, "w4": 0, "atk": 0, "scan": 0,
-                     "wmin": 0, "smin": 0, "ua": set(), "tool": set(), "sample": "", "ftpok": 0, "ftpbad": 0, "smb": 0,
+                     "wmin": 0, "smin": 0, "probe": 0, "ua": set(), "tool": set(), "sample": "", "ftpok": 0, "ftpbad": 0, "smb": 0,
                      "conn": [], "drop": 0, "dropports": set(), "wtmp": 0, "btmp": 0, "first": "", "last": ""}
 A = collections.defaultdict(blank)
 selfips, selfnets, gws, dnss, hosts, users = set(), set(), set(), set(), [], collections.Counter()
@@ -108,6 +111,7 @@ for fn in sorted(os.listdir(src)):
             a["wmin"] = max(a["wmin"], int(f[6])); a["ua"].add(f[9])
             if f[10]: a["tool"].add(f[10])
             if f[11] and not a["sample"]: a["sample"] = f[11]
+            if len(f) > 12 and f[12].isdigit(): a["probe"] += int(f[12])
         elif t == "FTP":
             a["svcs"].add("ftp"); a["ftpok"] += int(f[2]); a["ftpbad"] += int(f[3])
         elif t == "SMB":
@@ -123,14 +127,16 @@ for fn in sorted(os.listdir(src)):
 H = max(len(set(hosts)), 1)
 
 def classify(ip, a):
-    ev, red, scr, blk, team = [], 0, 0, 0, 0
+    ev, red, scr, blk, team, claim = [], 0, 0, 0, 0, False
     lab = label_for(ip)
     teamkey = sorted({o["host"] for o in a["ok"] if o["fp"] in TEAMFP})
     if teamkey: team += 5; ev.append("team key login on " + ",".join(teamkey))
     for o in a["ok"]:
         if o["cid"] != "-":
-            if re.search(r"competition|infra|black|vault|scor", o["cid"], re.I): blk += 4; ev.append(f"cert ID '{o['cid']}' as {o['user']}")
+            # the key ID is whatever the signer typed: a forged cert (INV3) can say "black" or "scoring" too
+            if o["user"] == "root" and BLACKID.search(o["cid"]): claim = True; ev.append(f"root via certificate claiming '{o['cid']}' (IDs can be forged)")
             elif o["user"] == "root": red += 3; ev.append(f"root via certificate ID '{o['cid']}'")
+            elif BLACKID.search(o["cid"]): blk += 4; ev.append(f"cert ID '{o['cid']}' as {o['user']}")
             # a user logging in as themselves with their own cert (ID = username) is normal step-ca use, often the scorer
             elif o["cid"] == o["user"]: ev.append(f"{o['user']} with their own certificate")
             else: red += 1; ev.append(f"certificate ID '{o['cid']}' as {o['user']}")
@@ -140,10 +146,12 @@ def classify(ip, a):
     elif a["fail"] >= 3: red += 1; ev.append(f"{a['fail']} failed SSH logins")
     if a["btmp"] >= 10: red += 1; ev.append(f"{a['btmp']} failed logins in btmp")
     if a["atk"]: red += 3; ev.append(f"{a['atk']} attack-looking web requests, e.g. {a['sample'][:45]}")
+    if a["probe"]: ev.append(f"{a['probe']} requests to login/admin pages (wp-login, phpmyadmin...; scorers do this too)")
     if a["scan"]: red += 3; ev.append("scanner user-agent: " + ", ".join(sorted(a["tool"]))[:40])
     if a["ftpbad"] >= 3: red += 1; ev.append(f"{a['ftpbad']} failed FTP logins")
     if a["drop"]: red += 2; ev.append(f"dropped by our firewall {a['drop']}x (ports {' '.join(sorted(a['dropports'], key=lambda p: int(p) if p.isdigit() else 0)[:6])})")
-    sh = [c for c in a["conn"] if c["proc"].split("/")[-1].rstrip("0123456789.") in SHELLS or c["proc"] in SHELLS]
+    pname = lambda c: c["proc"].split("/")[-1].rstrip("0123456789.")
+    sh = [c for c in a["conn"] if pname(c) in SHELLS or c["proc"] in SHELLS or (c["dir"] == "out" and (pname(c) in INTERP or c["proc"] in INTERP))]
     if sh: red += 4; ev.append("SHELL holding a connection: " + ", ".join(f"{c['proc']}@{c['host']}" for c in sh[:3]))
     cov = len(a["hosts"]) / H
     steady = max(a["wmin"], a["smin"])
@@ -162,6 +170,7 @@ def classify(ip, a):
     if blk >= 4 and red < 3: return "BLACK", "likely", ev
     if red >= 4 and red >= scr: return "RED", "likely", ev
     if scr >= 5 and steady >= 15 and red <= 1: return "SCORER", "likely", ev
+    if claim and red < 2: return "UNKNOWN", "ASK TEAM", ev
     if red >= 2: return "RED", "possible", ev
     if scr >= 3 and steady >= 15 and red <= 1: return "SCORER", "possible", ev
     if ip in dnss: return "DNS/DC?", "possible", ["DNS server in resolv.conf (often the domain controller)"] + ev
@@ -203,12 +212,22 @@ lab_nets = lambda kinds: [n for n, l, _ in labels if l in kinds]
 covered = lambda ip, kinds: any(ipaddress.ip_address(ip) in n for n in lab_nets(kinds))
 trusted = list(dict.fromkeys(sorted(selfnets) + [str(n) for n in lab_nets(("team", "black"))] +
                [r["ip"] for r in rows if r["cat"] == "TEAM" and r["conf"] == "certain" and not covered(r["ip"], ("team", "black"))]))
-maybe_trusted = [r["ip"] for r in rows if r["cat"] == "BLACK" and r["conf"] == "likely"]
+# a subnet that holds a RED / ASK TEAM IP would let them in: mark it * so firewall.sh refuses it until you decide
+bad_ips = [r["ip"] for r in rows if r["cat"] == "RED" or r["conf"] == "ASK TEAM"]
+inside = lambda net: [ip for ip in bad_ips if ipaddress.ip_address(ip) in ipaddress.ip_network(net, strict=False)]
+risky = {n: inside(n) for n in trusted if inside(n)}
+wide = [n for n in trusted if n not in risky and ipaddress.ip_network(n, strict=False).prefixlen < 16]
+trusted = [n + "*" if n in risky or n in wide else n for n in trusted]
+# BLACK comes from the cert ID alone, which a forged cert can fake: never put it in --trusted automatically
+black_by_id = [r["ip"] for r in rows if r["cat"] == "BLACK" and r["conf"] == "likely"]
 scorer = [str(n) for n in lab_nets(("scorer",))]
 maybe_scorer = [r["ip"] for r in rows if r["cat"] == "SCORER" and r["conf"] in ("likely", "possible")]
 asks = [r["ip"] for r in rows if r["cat"] == "UNKNOWN" and r["conf"] == "ASK TEAM"]
 print(f"\nFirewall flags (confirm anything marked * with your team, then put it in {labels_path}):")
-print("  --trusted " + ",".join(trusted + [x + "*" for x in maybe_trusted]) + "   --scorer " + (",".join(scorer + [x + "*" for x in maybe_scorer]) or "<UNKNOWN: find it before using the firewall>"))
+print("  --trusted " + ",".join(trusted) + "   --scorer " + (",".join(scorer + [x + "*" for x in maybe_scorer]) or "<UNKNOWN: find it before using the firewall>"))
+for n, ips in risky.items(): print(f"  WARNING: {n} contains {', '.join(ips[:5])} (RED / ASK TEAM). Trust single IPs instead, or label those IPs first")
+for n in wide: print(f"  WARNING: {n} is wider than /16: are other teams or the red team in it?")
+if black_by_id: print("  BLACK only by certificate ID (IDs can be forged), not added to --trusted. Ask black team first: " + ", ".join(black_by_id))
 if asks: print("  ASK TEAM before blocking (they logged in as root and aren't labeled): " + ", ".join(asks))
 print("  never block TEAM / SCORER / BLACK / GATEWAY rows; RED 'possible' needs a second look")
 print(f"\nSaved: {out_base}.md and {out_base}.csv")
