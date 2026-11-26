@@ -94,7 +94,7 @@ my_subnets() { ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {print $4}' | tr
 ssh_client_ip() { # sudo (Ansible become) drops SSH_CONNECTION, so also look in our parent processes' environment
     c=${SSH_CONNECTION:-${SSH_CLIENT:-}}; p=$$
     while [ -z "$c" ] && [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
-        c=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p; s/^SSH_CLIENT=//p' | head -n 1)
+        c=$( { tr '\0' '\n' < "/proc/$p/environ"; } 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p; s/^SSH_CLIENT=//p' | head -n 1)
         p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
     done
     echo "$c" | awk '{print $1}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
@@ -128,8 +128,16 @@ report_conns() { # survivors of the firewall; with --kill-existing, cut them
     if [ "$KILL" = 1 ]; then
         for ip in $(echo "$u" | awk '{print $1}' | sort -u); do
             has conntrack && { conntrack -D -s "$ip" >/dev/null 2>&1; conntrack -D -d "$ip" >/dev/null 2>&1; }
-            has ss && ss -K dst "$ip" >/dev/null 2>&1
-            say "cut open connections with $ip ($(echo "$u" | awk -v i="$ip" '$1 == i {print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//'))"
+            has ss && { ss -K dst "$ip" >/dev/null 2>&1; ss -K src "$ip" >/dev/null 2>&1; }
+        done
+        # ss -K does nothing on kernels without CONFIG_INET_DIAG_DESTROY (WSL, some Alpine/custom builds): check, don't assume
+        left=$(untrusted_conns)
+        for ip in $(echo "$u" | awk '{print $1}' | sort -u); do
+            procs=$(echo "$u" | awk -v i="$ip" '$1 == i {print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+            if echo "$left" | awk -v i="$ip" '$1 == i {f = 1} END {exit !f}'; then
+                pids=$(ss -tnp 2>/dev/null | grep -F "$ip:" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | tr '\n' ' ' | sed 's/ $//')
+                say "could NOT cut connections with $ip ($procs; this kernel can't kill sockets). Check, then: kill ${pids:-<pid from ss -tnp>}"
+            else say "cut open connections with $ip ($procs)"; fi
         done
     else
         say "open connections with untrusted IPs (these SURVIVE the firewall; check them, or re-run with --kill-existing):"

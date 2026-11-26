@@ -126,9 +126,9 @@ for fn in sorted(os.listdir(src)):
             a["btmp"] += int(f[2])
 H = max(len(set(hosts)), 1)
 
-def classify(ip, a):
+def classify(ip, a, use_label=True):
     ev, red, scr, blk, team, claim = [], 0, 0, 0, 0, False
-    lab = label_for(ip)
+    lab = label_for(ip) if use_label else None
     teamkey = sorted({o["host"] for o in a["ok"] if o["fp"] in TEAMFP})
     if teamkey: team += 5; ev.append("team key login on " + ",".join(teamkey))
     for o in a["ok"]:
@@ -183,13 +183,15 @@ for ip, a in A.items():
         if ipaddress.ip_address(ip).is_loopback: continue
     except ValueError: continue
     cat, conf, ev = classify(ip, a)
+    # labeled only through a subnet: what the evidence alone says (a 'team' /24 must not hide a red IP)
+    lab = label_for(ip); guess = classify(ip, a, False)[:2] if lab and lab[0].prefixlen < 32 else (cat, conf)
     ev = list(dict.fromkeys(ev))
     okcount = sum(o["n"] for o in a["ok"]) + a["ftpok"] + a["wtmp"]
     alert = cat == "RED" and okcount > 0
     if alert: ev = [f"!! SUCCESSFUL LOGINS: {okcount}"] + ev
     rows.append({"ip": ip, "cat": cat, "conf": conf, "boxes": len(a["hosts"]), "svcs": ",".join(sorted(a["svcs"])),
                  "events": a["web"] + a["fail"] + okcount + a["smb"] + len(a["conn"]), "fails": a["fail"] + a["ftpbad"] + a["btmp"],
-                 "evidence": "; ".join(ev), "alert": alert})
+                 "evidence": "; ".join(ev), "alert": alert, "guess": guess})
 order = {"RED": 0, "UNKNOWN": 1, "SCORER": 2, "BLACK": 3, "TEAM": 4, "DNS/DC?": 5, "GATEWAY": 6, "SELF": 7, "IGNORE": 8}
 rows.sort(key=lambda r: (not r["alert"], order.get(r["cat"], 1), -r["events"]))
 
@@ -213,7 +215,7 @@ covered = lambda ip, kinds: any(ipaddress.ip_address(ip) in n for n in lab_nets(
 trusted = list(dict.fromkeys(sorted(selfnets) + [str(n) for n in lab_nets(("team", "black"))] +
                [r["ip"] for r in rows if r["cat"] == "TEAM" and r["conf"] == "certain" and not covered(r["ip"], ("team", "black"))]))
 # a subnet that holds a RED / ASK TEAM IP would let them in: mark it * so firewall.sh refuses it until you decide
-bad_ips = [r["ip"] for r in rows if r["cat"] == "RED" or r["conf"] == "ASK TEAM"]
+bad_ips = [r["ip"] for r in rows if r["cat"] == "RED" or r["conf"] == "ASK TEAM" or r["guess"][0] == "RED" or r["guess"][1] == "ASK TEAM"]
 inside = lambda net: [ip for ip in bad_ips if ipaddress.ip_address(ip) in ipaddress.ip_network(net, strict=False)]
 risky = {n: inside(n) for n in trusted if inside(n)}
 wide = [n for n in trusted if n not in risky and ipaddress.ip_network(n, strict=False).prefixlen < 16]
