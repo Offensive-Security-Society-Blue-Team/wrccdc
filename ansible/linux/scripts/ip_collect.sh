@@ -56,8 +56,9 @@ function minute(line) {
         kt = "-"; fp = "-"; cid = "-"
         for (i = 1; i <= NF; i++) {
             if ($i == "ssh2:") { kt = $(i + 1); fp = $(i + 2) }
-            if ($i == "ID" && cid == "-") { cid = $(i + 1) }
         }
+        # whole key ID (it can contain spaces): text between " ID " and " (serial"
+        if (match($0, / ID .* \(serial /)) { cid = substr($0, RSTART + 4, RLENGTH - 13); if (cid == "") cid = "(empty)" }
         gsub(/\|/, "", user); gsub(/\|/, "", cid)
         k = ip SUBSEP user SUBSEP meth SUBSEP kt SUBSEP fp SUBSEP cid
         ok[k]++; if (!(k in okf)) okf[k] = m; okl[k] = m
@@ -87,7 +88,9 @@ $1 ~ "^" IPRE "$" {
     if (!(ip in first)) first[ip] = m; last[ip] = m
     split($0, q, "\""); req = tolower(q[2]); split(q[3], st, " "); ua = q[6]; lua = tolower(ua)
     if (st[1] ~ /^4/) c4[ip]++
-    if (req ~ /\.\.\/|%2e%2e|etc\/passwd|union[ +%20]*select|select.*from|<script|%3cscript|cmd=|exec=|bin\/sh|bin%2fsh|jndi:|\$\{|\.env|\.git\/|wp-login|xmlrpc|phpmyadmin|manager\/html|cgi-bin|\/shell|eval\(|base64_decode/) {
+    # login/admin pages the scorer checks too (WordPress, phpMyAdmin, Tomcat): counted apart, not as attacks
+    if (req ~ /wp-login|xmlrpc|phpmyadmin|manager\/html|cgi-bin/) probe[ip]++
+    if (req ~ /\.\.\/|%2e%2e|etc\/passwd|union[ +%20]*select|select.*from|<script|%3cscript|cmd=|exec=|bin\/sh|bin%2fsh|jndi:|\$\{|\.env|\.git\/|\/shell|eval\(|base64_decode/) {
         atk[ip]++; if (!(ip in sample)) { s = q[2]; gsub(/\|/, "", s); sample[ip] = substr(s, 1, 70) }
     }
     if (lua ~ /sqlmap|nikto|nmap|gobuster|dirbuster|feroxbuster|ffuf|wfuzz|nuclei|hydra|masscan|zgrab|wpscan|burp|metasploit|zap/) { scan[ip]++; tool[ip] = ua }
@@ -97,7 +100,7 @@ END {
     for (k in uac) { split(k, a, SUBSEP); if (uac[k] > best[a[1]]) { best[a[1]] = uac[k]; bua[a[1]] = a[2] } }
     for (ip in n) {
         t = tool[ip]; gsub(/\|/, "", t)
-        print "WEB|" ip "|" n[ip] "|" c4[ip] + 0 "|" atk[ip] + 0 "|" scan[ip] + 0 "|" mins[ip] "|" first[ip] "|" last[ip] "|" bua[ip] "|" substr(t, 1, 40) "|" sample[ip]
+        print "WEB|" ip "|" n[ip] "|" c4[ip] + 0 "|" atk[ip] + 0 "|" scan[ip] + 0 "|" mins[ip] "|" first[ip] "|" last[ip] "|" bua[ip] "|" substr(t, 1, 40) "|" sample[ip] "|" probe[ip] + 0
     }
 }'
 
