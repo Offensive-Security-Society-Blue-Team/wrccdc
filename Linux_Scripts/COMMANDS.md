@@ -14,7 +14,7 @@ Internal 192.168.220.x, external 10.100.112.x.
 |---|---|---|
 | `Linux_Scripts/` | team enum / software / DNS / password scripts, copied onto one box and run by hand (section 1b) | the box |
 | `Linux_Scripts/Wazzuh/` | manual / offline Wazuh install and rule notes (section 13b) | the Wazuh box |
-| `ansible/linux/` | playbooks 00-06 + `run.sh` / `keys_pick.sh` for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
+| `ansible/linux/` | playbooks 00-06 + `run.sh` / `keys_pick.sh` / `ip_map.sh` for every Linux box at once (sections 2-2c) | your laptop, `cd ansible/linux` first |
 | `ansible/linux/scripts/` | every audit / fix script (hunt, user_audit, verify_clean, lockdown, backup...). Run on all boxes with `./run.sh`, or copy ONE onto a box and run it by hand (section 1) | either |
 | `ansible/windows/` | Windows playbooks (Windows teammates) | - |
 
@@ -130,7 +130,38 @@ ansible skerja -m script -a "scripts/reissue_cert.sh /etc/step/skerja-https.env"
 # --- red team session still connected (verify_clean says RED-SESSION)
 ansible <host> -m raw -a "ss -tnp | grep -E '10\.194\.194\.85|10\.197\.207\.23'; who"    # netstat -tnp on Alpine
 ansible <host> -m raw -a "ss -K dst 10.194.194.85; ss -K dst 10.197.207.23"                  # or kill <PID>
+#   ss -K prints nothing either way: run the ss -tnp line again. Still there? the kernel can't kill sockets -> kill <PID>
 ```
+
+## 2b2. Who is who, then the firewall (`ip_map.sh`, `scripts/firewall.sh`, run from `ansible/linux/`)
+
+Never block an IP until you know who it is. Details: "Who is who, then the firewall" in `ansible/linux/README.md`.
+
+```bash
+./ip_map.sh                       # IP, WHO (TEAM/SCORER/BLACK/RED/UNKNOWN), HOW SURE, evidence -> loot/ipmap-<time>.md/.csv
+./ip_map.sh -l haf,djupi --top    # some boxes only, plus Top-10 tables for injects
+# confirmed? write it in files/ipmap_labels.txt (e.g. "scorer 10.x.x.x from packet"), re-run until no * is left
+
+ansible <one-host> -m script -a "scripts/firewall.sh plan --trusted <lan-cidr> --scorer <scorer-ip>"   # changes nothing
+ansible linux -m script -a "scripts/firewall.sh test 120 --trusted <lan-cidr> --scorer <scorer-ip>"    # undoes itself in 120s
+ansible linux -m script -a "scripts/firewall.sh confirm"                        # scoreboard still green? keep it
+ansible linux -m script -a "scripts/firewall.sh apply --saved --kill-existing"  # also cut shells already connected
+ansible linux -m script -a "scripts/firewall.sh status"                         # top dropped sources = more red IPs
+ansible linux -m script -a "scripts/firewall.sh revert"                         # emergency undo
+```
+
+Reading ip_map:
+- **ASK TEAM** = logged in as root and matches nothing, *or* root with a cert whose ID says black team/scoring. Cert IDs are typed by whoever signs them (INV3's forged cert could have said "black-team"): ask in chat.
+- **BLACK only by cert ID** is printed on its own line and never put in `--trusted`. Confirm with black team first.
+- **`wp-login` / `xmlrpc` / `phpmyadmin` / `manager/html` / `cgi-bin` hits are not attacks**: the scorer checks those pages too. Steady hits every minute look like the scorer.
+- **node / python / php holding a connection** is a shell only when the box connected *out* (an app serving a client is normal).
+- **`*` on a suggested `--trusted` subnet** = a RED / ASK TEAM IP is inside it (even if your `team` label covers it), or it is wider than /16. firewall.sh refuses `*`: trust single IPs or label first.
+
+firewall.sh:
+- **Your SSH IP is kept** even under Ansible `become`. `WARNING: could not find your SSH client IP` = add the Ansible/jump host to `--trusted` yourself.
+- **Docker/Podman/k8s networks are trusted automatically** (`trusted container/pod network ...` lines) so pods keep reaching 6443/10250. `--no-container-nets` turns it off.
+- **Shells already connected survive the firewall.** `test`/`apply` list `open connections with untrusted IPs`; `--kill-existing` cuts them. `could NOT cut ... kill <pid>` = the kernel can't kill sockets: check that PID (`ss -tnp`), then `kill` it. Ordinary clients cut this way just reconnect.
+- **Only IPv4** is filtered (it prints a note when the box has IPv6), and published container ports (FORWARD) are not.
 
 ## 2c. Ad-hoc
 
@@ -227,6 +258,7 @@ firewall-cmd --reload
 iptables -L -n -v
 ```
 **Never block the scoring engine.** If a service goes red right after a firewall change, undo it first.
+On Ansible-managed boxes prefer `scripts/firewall.sh` (section 2b2): it auto-reverts, keeps your SSH IP and container networks, and leaves ufw/firewalld rules alone.
 
 ## 9. Web servers and web shells
 
